@@ -37,11 +37,11 @@ public class HttpRequestUtil {
 
     public static class HttpResponse {
         public String url;
-        public JSONObject body; //response body
+        public JSONObject body; // response body
         public int code = -1; // response code
-        public int httpCode = -1; //http code
-        public Throwable throwable; //some errors
-        public long duration; //request duration
+        public int httpCode = -1; // http code
+        public Throwable throwable; // some errors
+        public long duration; // request duration
 
         public boolean isOK() {
             getErrCode();
@@ -80,40 +80,63 @@ public class HttpRequestUtil {
         }
     }
 
-    public static HttpsURLConnection connect(String url, Map<String, String> headerParamMap, HttpRequestOptions options, String method, String contentLength) throws Throwable {
-        URL httpURL = new URL(url);
+    public static HttpsURLConnection connect(
+            String url,
+            Map<String, String> headerParamMap,
+            HttpRequestOptions options,
+            String method,
+            String contentLength)
+            throws Throwable {
+        return connect(
+                url, headerParamMap, options, method, contentLength, TTTrackingConsent.capture());
+    }
 
-        HttpsURLConnection connection = (HttpsURLConnection) httpURL.openConnection();
+    private static HttpsURLConnection connect(
+            String url,
+            Map<String, String> headerParamMap,
+            HttpRequestOptions options,
+            String method,
+            String contentLength,
+            long generation)
+            throws Throwable {
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isCurrent(generation))
+                throw new IllegalStateException("Tracking consent is not granted");
+            URL httpURL = new URL(url);
 
-        connection.setRequestMethod(method);
-        options.configConnection(connection);
-        connection.setDoInput(true);
-        connection.setUseCaches(false);
+            HttpsURLConnection connection = (HttpsURLConnection) httpURL.openConnection();
 
-        if (method.equals("GET")) {
-            connection.setDoOutput(false);
-        } else if (method.equals("POST")) {
-            connection.setDoOutput(true);
-            connection.setRequestProperty("Content-Length", contentLength);
-        }
+            connection.setRequestMethod(method);
+            options.configConnection(connection);
+            connection.setDoInput(true);
+            connection.setUseCaches(false);
+            connection.setInstanceFollowRedirects(false);
 
-        if (headerParamMap != null && !headerParamMap.isEmpty()) {
-            for (Map.Entry<String, String> entry : headerParamMap.entrySet()) {
-                final String key = entry.getKey();
-                final String value = entry.getValue();
-                if (!TextUtils.isEmpty(key) && !TextUtils.isEmpty(value)) {
-                    connection.setRequestProperty(key, value);
+            if (method.equals("GET")) {
+                connection.setDoOutput(false);
+            } else if (method.equals("POST")) {
+                connection.setDoOutput(true);
+                connection.setRequestProperty("Content-Length", contentLength);
+            }
+
+            if (headerParamMap != null && !headerParamMap.isEmpty()) {
+                for (Map.Entry<String, String> entry : headerParamMap.entrySet()) {
+                    final String key = entry.getKey();
+                    final String value = entry.getValue();
+                    if (!TextUtils.isEmpty(key) && !TextUtils.isEmpty(value)) {
+                        connection.setRequestProperty(key, value);
+                    }
                 }
             }
+
+            if (options.isGzip) {
+                connection.setRequestProperty("Content-Encoding", "gzip");
+            }
+
+            connection.connect();
+
+            return connection;
         }
-
-        if (options.isGzip) {
-            connection.setRequestProperty("Content-Encoding", "gzip");
-        }
-
-        connection.connect();
-
-        return connection;
     }
 
     public static boolean shouldRedirect(int status) {
@@ -126,22 +149,36 @@ public class HttpRequestUtil {
         return false;
     }
 
-    public static HttpResponse doGet(String url, Map<String, String> headerParamMap, HttpRequestOptions options) {
+    public static HttpResponse doGet(
+            String url, Map<String, String> headerParamMap, HttpRequestOptions options) {
+        long generation = TTTrackingConsent.capture();
+        return TTTrackingConsent.call(
+                generation,
+                () -> doGetWithConsent(url, headerParamMap, options, generation),
+                new HttpResponse());
+    }
+
+    private static HttpResponse doGetWithConsent(
+            String url,
+            Map<String, String> headerParamMap,
+            HttpRequestOptions options,
+            long generation) {
         long initTimeMS = SystemClock.elapsedRealtime();
 
         HttpResponse response = new HttpResponse();
         response.url = url;
+        if (generation < 0) return response;
 
         HttpsURLConnection connection = null;
 
         try {
-            connection = connect(url, headerParamMap, options, "GET", null);
+            connection = connect(url, headerParamMap, options, "GET", null, generation);
 
             boolean redirect = shouldRedirect(connection.getResponseCode());
             if (redirect) {
                 String redirectUrl = connection.getHeaderField("Location");
                 IOUtils.close(connection);
-                connection = connect(redirectUrl, headerParamMap, options, "GET", null);
+                connection = connect(redirectUrl, headerParamMap, options, "GET", null, generation);
             }
 
             int httpCode = connection.getResponseCode();
@@ -164,19 +201,21 @@ public class HttpRequestUtil {
             }
         }
 
-
         response.duration = SystemClock.elapsedRealtime() - initTimeMS;
 
+        if (!TTTrackingConsent.isCurrent(generation)) return new HttpResponse();
         monitorNetRequest(response);
 
         return response;
     }
 
-    public static HttpResponse doPost(String url, Map<String, String> headerParamMap, String jsonStr) {
+    public static HttpResponse doPost(
+            String url, Map<String, String> headerParamMap, String jsonStr) {
         return doPost(url, headerParamMap, jsonStr, true);
     }
 
-    public static HttpResponse doPost(String url, Map<String, String> headerParamMap, String jsonStr, boolean needSignature) {
+    public static HttpResponse doPost(
+            String url, Map<String, String> headerParamMap, String jsonStr, boolean needSignature) {
         HttpRequestOptions options = new HttpRequestOptions();
 
         try {
@@ -197,11 +236,34 @@ public class HttpRequestUtil {
         return doPost(url, headerParamMap, jsonStr, options, needSignature);
     }
 
-    public static HttpResponse doPost(String url, Map<String, String> headerParamMap, String jsonStr, HttpRequestOptions options, boolean needSignature) {
+    public static HttpResponse doPost(
+            String url,
+            Map<String, String> headerParamMap,
+            String jsonStr,
+            HttpRequestOptions options,
+            boolean needSignature) {
+        long generation = TTTrackingConsent.capture();
+        return TTTrackingConsent.call(
+                generation,
+                () ->
+                        doPostWithConsent(
+                                url, headerParamMap, jsonStr, options, needSignature, generation),
+                new HttpResponse());
+    }
+
+    private static HttpResponse doPostWithConsent(
+            String url,
+            Map<String, String> headerParamMap,
+            String jsonStr,
+            HttpRequestOptions options,
+            boolean needSignature,
+            long generation) {
+        headerParamMap = new java.util.HashMap<>(headerParamMap);
         long initTimeMS = SystemClock.elapsedRealtime();
 
         HttpResponse response = new HttpResponse();
         response.url = url;
+        if (generation < 0) return response;
 
         HttpURLConnection connection = null;
         OutputStream outputStream = null;
@@ -230,10 +292,10 @@ public class HttpRequestUtil {
 
             if (writeBytes == null || writeBytes.length == 0) {
                 monitorGzipData(info);
-                writeBytes = new byte[]{};
+                writeBytes = new byte[] {};
             }
 
-            connection = connect(url, headerParamMap, options, "POST", contentLength);
+            connection = connect(url, headerParamMap, options, "POST", contentLength, generation);
             outputStream = connection.getOutputStream();
             outputStream.write(writeBytes);
             outputStream.flush();
@@ -241,7 +303,14 @@ public class HttpRequestUtil {
             if (redirect) {
                 String redirectUrl = connection.getHeaderField("Location");
                 IOUtils.close(connection);
-                connection = connect(redirectUrl, headerParamMap, options, "POST", contentLength);
+                connection =
+                        connect(
+                                redirectUrl,
+                                headerParamMap,
+                                options,
+                                "POST",
+                                contentLength,
+                                generation);
                 outputStream = connection.getOutputStream();
                 outputStream.write(writeBytes);
                 outputStream.flush();
@@ -257,7 +326,6 @@ public class HttpRequestUtil {
                     response.body = json;
                     response.code = JSON.getInt(json, "code", -1);
                 }
-
             }
         } catch (Throwable e) {
             response.throwable = e;
@@ -269,6 +337,7 @@ public class HttpRequestUtil {
 
         response.duration = SystemClock.elapsedRealtime() - initTimeMS;
 
+        if (!TTTrackingConsent.isCurrent(generation)) return new HttpResponse();
         monitorNetRequest(response);
 
         return response;
@@ -280,7 +349,7 @@ public class HttpRequestUtil {
         }
 
         try {
-            //monitor ignore
+            // monitor ignore
             if (TextUtils.isEmpty(response.url) || response.url.contains(UrlConst.PATH_MONITOR)) {
                 return;
             }
@@ -340,7 +409,7 @@ public class HttpRequestUtil {
         }
         ByteArrayOutputStream outputStream = null;
         GZIPOutputStream gzipOutputStream = null;
-        byte[] bytes = new byte[]{};
+        byte[] bytes = new byte[] {};
         try {
             outputStream = new ByteArrayOutputStream();
             gzipOutputStream = new GZIPOutputStream(outputStream);

@@ -13,17 +13,16 @@ import android.content.ServiceConnection;
 import android.content.SharedPreferences;
 import android.os.IBinder;
 import android.os.IInterface;
-import android.os.Looper;
 import android.os.Parcel;
 import android.os.SystemClock;
 import android.text.TextUtils;
-import android.util.Log;
 
 import com.tiktok.TikTokBusinessSdk;
 import com.tiktok.util.IOUtils;
 import com.tiktok.util.JSON;
 import com.tiktok.util.TTLogger;
 import com.tiktok.util.TTReflect;
+import com.tiktok.util.TTTrackingConsent;
 import com.tiktok.util.TTUtil;
 
 import org.json.JSONObject;
@@ -34,60 +33,88 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- * get advertiser id info using Google Play API
- */
+/** get advertiser id info using Google Play API */
 public class TTIdentifierFactory {
-    private static final int UPDATE_TIMES = 3600 * 1000;//if successful, refresh periodically
+    private static final int UPDATE_TIMES = 3600 * 1000; // if successful, refresh periodically
     private static final String TAG = "TTIdentifierFactory";
     private static final TTLogger logger = new TTLogger(TAG, TikTokBusinessSdk.getLogLevel());
 
     private static volatile String sGAID;
     private static volatile boolean sAdTrackingEnabled;
+    private static final java.util.Set<AdIdConnection> activeConnections =
+            new java.util.concurrent.CopyOnWriteArraySet<>();
 
     private static final AtomicInteger sMaxRetry = new AtomicInteger(0);
     private static volatile long sNextUpdateTime = SystemClock.elapsedRealtime() + UPDATE_TIMES;
 
+    public static void clear(Context context) {
+        for (AdIdConnection connection : activeConnections) connection.close();
+        sGAID = null;
+        sAdTrackingEnabled = true;
+        sMaxRetry.set(0);
+        sNextUpdateTime = 0;
+        if (sExecutor != null) {
+            sExecutor.shutdownNow();
+            sExecutor = null;
+        }
+        if (context != null
+                && !context.getSharedPreferences("com.tiktok.sdk.ids", Context.MODE_PRIVATE)
+                        .edit()
+                        .clear()
+                        .commit()) {
+            throw new IllegalStateException(
+                    "Unable to erase TikTok advertising identity preferences");
+        }
+        GAIDCache.sInstance = null;
+    }
+
     public static AdIdInfo getGoogleAdIdInfo(Context context) {
-        Log.e("TAG", "isMain===" + (Thread.currentThread() == Looper.getMainLooper().getThread()));
+        return TTTrackingConsent.call(
+                TTTrackingConsent.capture(),
+                () -> getGoogleAdIdInfoWithConsent(context),
+                AdIdInfo.buildDefault());
+    }
+
+    private static AdIdInfo getGoogleAdIdInfoWithConsent(Context context) {
+        if (!TTTrackingConsent.isGranted()) return AdIdInfo.buildDefault();
         if (sMaxRetry.get() > 20) {
             return AdIdInfo.buildDefault();
         }
 
         AdIdInfo adIdInfo = null;
 
-        //1 from cache
+        // 1 from cache
         adIdInfo = getByCache(context);
 
-        //2 from reflect
+        // 2 from reflect
         if (adIdInfo == null) {
             adIdInfo = getByReflect(context);
         }
 
-        //3 from service
+        // 3 from service
         if (adIdInfo == null) {
             adIdInfo = getByService(context);
         }
 
-        //4 default
+        // 4 default
         if (adIdInfo == null) {
             adIdInfo = AdIdInfo.buildDefault();
         }
 
-        //only get success need update
+        // only get success need update
         if (adIdInfo.from == AdIdInfo.FROM_ROM || adIdInfo.from == AdIdInfo.FROM_SP) {
             updateAdIdInfo(context);
         }
 
-        //send monitor event
+        // send monitor event
         sendMonitor(adIdInfo);
 
-        //mark no gaid
+        // mark no gaid
         if (TextUtils.isEmpty(adIdInfo.adId)) {
             sMaxRetry.getAndIncrement();
         }
 
-        return adIdInfo;
+        return TTTrackingConsent.isGranted() ? adIdInfo : AdIdInfo.buildDefault();
     }
 
     private static void sendMonitor(AdIdInfo info) {
@@ -107,82 +134,98 @@ public class TTIdentifierFactory {
     private static ExecutorService sExecutor;
 
     private static void updateAdIdInfo(Context context) {
-        try {
-            long currentTime = SystemClock.elapsedRealtime();
-            if (sNextUpdateTime > 0 && sNextUpdateTime < currentTime) {
-                logger.info("gaid is not updated yet");
-                return;
-            }
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isGranted()) return;
 
-            logger.info("gaid is updated");
-
-            //after one hour update
-            sNextUpdateTime = currentTime + UPDATE_TIMES;
-
-            if (sExecutor == null) {
-                sExecutor = Executors.newSingleThreadScheduledExecutor(new TTThreadFactory());
-            }
-
-            sExecutor.submit(() -> {
-                //first reflect, then service
-                if (getByReflect(context) == null) {
-                    getByService(context);
+            try {
+                long currentTime = SystemClock.elapsedRealtime();
+                if (sNextUpdateTime > 0 && sNextUpdateTime < currentTime) {
+                    logger.info("gaid is not updated yet");
+                    return;
                 }
-            });
-        } catch (Throwable ignore) {
+
+                logger.info("gaid is updated");
+
+                // after one hour update
+                sNextUpdateTime = currentTime + UPDATE_TIMES;
+
+                if (sExecutor == null) {
+                    sExecutor = Executors.newSingleThreadScheduledExecutor(new TTThreadFactory());
+                }
+
+                sExecutor.submit(
+                        TTTrackingConsent.wrap(
+                                () -> {
+                                    // first reflect, then service
+                                    if (getByReflect(context) == null) {
+                                        getByService(context);
+                                    }
+                                }));
+            } catch (Throwable ignore) {
+            }
         }
     }
 
     private static AdIdInfo getByCache(Context context) {
-        // rom cache first
-        if (!TextUtils.isEmpty(sGAID)) {
-            AdIdInfo info = new AdIdInfo(sGAID, sAdTrackingEnabled);
-            info.from = AdIdInfo.FROM_ROM;
-            return info;
-        }
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isGranted()) return null;
 
-        // sp cache second
-        if (TextUtils.isEmpty(sGAID)) {
-            long start = SystemClock.elapsedRealtime();
-            String gaid = GAIDCache.getInstance(context).getGAID();
-            boolean enable = GAIDCache.getInstance(context).trackEnable();
-            if (!TextUtils.isEmpty(gaid)) {
-                sGAID = gaid;
-                sAdTrackingEnabled = enable;
-
+            // rom cache first
+            if (!TextUtils.isEmpty(sGAID)) {
                 AdIdInfo info = new AdIdInfo(sGAID, sAdTrackingEnabled);
-                info.from = AdIdInfo.FROM_SP;
-                info.duration = SystemClock.elapsedRealtime() - start;
+                info.from = AdIdInfo.FROM_ROM;
                 return info;
             }
-        }
 
-        return null;
+            // sp cache second
+            if (TextUtils.isEmpty(sGAID)) {
+                long start = SystemClock.elapsedRealtime();
+                String gaid = GAIDCache.getInstance(context).getGAID();
+                boolean enable = GAIDCache.getInstance(context).trackEnable();
+                if (!TextUtils.isEmpty(gaid)) {
+                    sGAID = gaid;
+                    sAdTrackingEnabled = enable;
+
+                    AdIdInfo info = new AdIdInfo(sGAID, sAdTrackingEnabled);
+                    info.from = AdIdInfo.FROM_SP;
+                    info.duration = SystemClock.elapsedRealtime() - start;
+                    return info;
+                }
+            }
+
+            return null;
+        }
     }
 
     private static AdIdInfo getByReflect(Context context) {
+        if (!TTTrackingConsent.isGranted()) return null;
         try {
             long start = SystemClock.elapsedRealtime();
 
-            Object infoObj = TTReflect.on("com.google.android.gms.ads.identifier.AdvertisingIdClient")
-                    .findMethod("getAdvertisingIdInfo", Context.class)
-                    .call(null, context);
+            Object infoObj =
+                    TTReflect.on("com.google.android.gms.ads.identifier.AdvertisingIdClient")
+                            .findMethod("getAdvertisingIdInfo", Context.class)
+                            .call(null, context);
             if (infoObj == null) {
                 return null;
             }
 
-            String adid = (String) TTReflect.on(infoObj.getClass())
-                    .findMethod("getId")
-                    .call(infoObj);
-            Boolean limit = (Boolean) TTReflect.on(infoObj.getClass())
-                    .findMethod("isLimitAdTrackingEnabled")
-                    .call(infoObj);
+            String adid =
+                    (String) TTReflect.on(infoObj.getClass()).findMethod("getId").call(infoObj);
+            Boolean limit =
+                    (Boolean)
+                            TTReflect.on(infoObj.getClass())
+                                    .findMethod("isLimitAdTrackingEnabled")
+                                    .call(infoObj);
 
-            if (!TextUtils.isEmpty(adid) && limit != null) {
-                sGAID = adid;
-                sAdTrackingEnabled = limit;
-                sNextUpdateTime = SystemClock.elapsedRealtime() + UPDATE_TIMES;
-                GAIDCache.getInstance(context).update(adid, limit);
+            if (TTTrackingConsent.isGranted() && !TextUtils.isEmpty(adid) && limit != null) {
+                TTTrackingConsent.runIfGranted(
+                        () -> {
+                            sGAID = adid;
+                            sAdTrackingEnabled = limit;
+                            sNextUpdateTime = SystemClock.elapsedRealtime() + UPDATE_TIMES;
+                            GAIDCache.getInstance(context).update(adid, limit);
+                        });
 
                 AdIdInfo info = new AdIdInfo(adid, limit);
                 info.from = AdIdInfo.FROM_REFLECT;
@@ -195,6 +238,7 @@ public class TTIdentifierFactory {
     }
 
     private static AdIdInfo getByService(Context context) {
+        if (!TTTrackingConsent.isGranted()) return null;
         // service binding intent
         AdIdConnection serviceConnection = null;
         try {
@@ -202,18 +246,29 @@ public class TTIdentifierFactory {
 
             Intent intent = new Intent("com.google.android.gms.ads.identifier.service.START");
             intent.setPackage("com.google.android.gms");
-            serviceConnection = new AdIdConnection();
+            serviceConnection = new AdIdConnection(context);
 
             // if connection is successful
-            if (context.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)) {
+            boolean bound;
+            synchronized (TTTrackingConsent.LOCK) {
+                if (!TTTrackingConsent.isGranted()) return null;
+                bound = context.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE);
+                serviceConnection.bound = bound;
+                if (bound) activeConnections.add(serviceConnection);
+            }
+            if (bound) {
                 AdIdInterface adIdInterface = new AdIdInterface(serviceConnection.getBinder());
+                if (!TTTrackingConsent.isGranted()) return null;
                 String adId = adIdInterface.getAdId();
                 boolean isAdTrackingEnabled = adIdInterface.isAdIdTrackingEnabled();
-                if (!TextUtils.isEmpty(adId)) {
-                    sGAID = adId;
-                    sAdTrackingEnabled = isAdTrackingEnabled;
-                    sNextUpdateTime = SystemClock.elapsedRealtime() + UPDATE_TIMES;
-                    GAIDCache.getInstance(context).update(adId, isAdTrackingEnabled);
+                if (TTTrackingConsent.isGranted() && !TextUtils.isEmpty(adId)) {
+                    TTTrackingConsent.runIfGranted(
+                            () -> {
+                                sGAID = adId;
+                                sAdTrackingEnabled = isAdTrackingEnabled;
+                                sNextUpdateTime = SystemClock.elapsedRealtime() + UPDATE_TIMES;
+                                GAIDCache.getInstance(context).update(adId, isAdTrackingEnabled);
+                            });
 
                     // everything is ok, call listener
                     AdIdInfo info = new AdIdInfo(adId, isAdTrackingEnabled);
@@ -230,17 +285,14 @@ public class TTIdentifierFactory {
         } finally {
             // finally unbind from service
             try {
-                if (serviceConnection != null) context.unbindService(serviceConnection);
+                if (serviceConnection != null) serviceConnection.close();
             } catch (Throwable ignore) {
             }
         }
         return null;
     }
 
-
-    /**
-     * Holds 'Ad ID and 'Is Limited Ad Tracking' flag
-     */
+    /** Holds 'Ad ID and 'Is Limited Ad Tracking' flag */
     public static class AdIdInfo {
         public static final int FROM_DEFAULT = 0;
         public static final int FROM_ROM = 10;
@@ -276,7 +328,7 @@ public class TTIdentifierFactory {
         private static final String SP_NAME = "com.tiktok.sdk.ids";
         private static final String SP_K_GAID = "gaid";
         private static final String SP_K_TRACK = "t_enable";
-        private volatile static GAIDCache sInstance;
+        private static volatile GAIDCache sInstance;
 
         private SharedPreferences mSP = null;
 
@@ -293,7 +345,9 @@ public class TTIdentifierFactory {
 
         private GAIDCache(Context context) {
             try {
-                mSP = context.getApplicationContext().getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
+                mSP =
+                        context.getApplicationContext()
+                                .getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
             } catch (Throwable ignore) {
             }
         }
@@ -329,24 +383,38 @@ public class TTIdentifierFactory {
 
         public void update(String gaid, boolean enable) {
             try {
-                mySP().edit()
-                        .putString(SP_K_GAID, gaid)
-                        .putBoolean(SP_K_TRACK, enable)
-                        .apply();
+                mySP().edit().putString(SP_K_GAID, gaid).putBoolean(SP_K_TRACK, enable).apply();
             } catch (Throwable ignore) {
             }
         }
     }
 
-    /**
-     * Service connection that retrieves Binder object from connected service
-     */
+    /** Service connection that retrieves Binder object from connected service */
     private static class AdIdConnection implements ServiceConnection {
+        private final Context context;
+        private final long generation = TTTrackingConsent.capture();
+        private boolean bound;
+
+        AdIdConnection(Context context) {
+            this.context = context;
+        }
+
+        void close() {
+            synchronized (TTTrackingConsent.LOCK) {
+                if (bound) {
+                    bound = false;
+                    context.unbindService(this);
+                }
+                queue.clear();
+                activeConnections.remove(this);
+            }
+        }
 
         private final BlockingQueue<IBinder> queue = new ArrayBlockingQueue<>(1);
 
         @Override
         public void onServiceConnected(ComponentName componentName, IBinder iBinder) {
+            if (!TTTrackingConsent.isCurrent(generation)) return;
             try {
                 this.queue.put(iBinder);
             } catch (Throwable ignore) {
@@ -354,23 +422,21 @@ public class TTIdentifierFactory {
         }
 
         @Override
-        public void onServiceDisconnected(ComponentName componentName) {
-        }
+        public void onServiceDisconnected(ComponentName componentName) {}
 
         public IBinder getBinder() {
             try {
-                return queue.take();
+                return queue.poll(2, java.util.concurrent.TimeUnit.SECONDS);
             } catch (Throwable ignore) {
             }
             return null;
         }
     }
 
-    /**
-     * Interface that deals with advertising service's Binder
-     */
+    /** Interface that deals with advertising service's Binder */
     private static class AdIdInterface implements IInterface {
-        private static final String INTERFACE_TOKEN = "com.google.android.gms.ads.identifier.internal.IAdvertisingIdService";
+        private static final String INTERFACE_TOKEN =
+                "com.google.android.gms.ads.identifier.internal.IAdvertisingIdService";
         private static final int AD_ID_TRANSACTION_CODE = 1;
         private static final int AD_TRACKING_TRANSACTION_CODE = 2;
 
@@ -426,5 +492,4 @@ public class TTIdentifierFactory {
             return limitedTrackingEnabled;
         }
     }
-
 }

@@ -5,12 +5,14 @@ import android.text.TextUtils;
 
 import com.tiktok.TikTokBusinessSdk;
 import com.tiktok.util.JSON;
+import com.tiktok.util.TTTrackingConsent;
 import com.tiktok.util.TTUtil;
 
 import org.json.JSONObject;
 
 public class DeeplinkCallbackWrapper implements TikTokBusinessSdk.FetchDeferredDeeplinkCompletion {
     private final TikTokBusinessSdk.FetchDeferredDeeplinkCompletion callback;
+    private final long consentGeneration = TTTrackingConsent.capture();
 
     private long initTime = 0;
     private long threadTime = 0;
@@ -23,9 +25,10 @@ public class DeeplinkCallbackWrapper implements TikTokBusinessSdk.FetchDeferredD
 
     @Override
     public void completion(String deepLinkUrl, ErrorData errorData) {
-        sendResultLog(deepLinkUrl, errorData);
-        if (callback != null) {
-            callback.completion(deepLinkUrl, errorData);
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isCurrent(consentGeneration)) return;
+            sendResultLog(deepLinkUrl, errorData);
+            if (callback != null) callback.completion(deepLinkUrl, errorData);
         }
     }
 
@@ -70,6 +73,4 @@ public class DeeplinkCallbackWrapper implements TikTokBusinessSdk.FetchDeferredD
     public void markEnd() {
         endTime = SystemClock.elapsedRealtime();
     }
-
-
 }

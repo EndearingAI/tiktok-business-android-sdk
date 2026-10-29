@@ -12,6 +12,7 @@ import android.content.Context;
 
 import com.tiktok.util.DecryptUtil;
 import com.tiktok.util.JSON;
+import com.tiktok.util.TTTrackingConsent;
 import com.tiktok.util.TTUtil;
 
 import org.json.JSONObject;
@@ -31,7 +32,23 @@ public class TTUserInfo implements Cloneable, Serializable {
 
     // clear the previous userInfo, useful when logging out
     public static void reset(Context context, boolean forceGenerateAnoId) {
-        sharedInstance.anonymousId = TTUtil.getOrGenAnoId(context, forceGenerateAnoId);
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isGranted()) return;
+            sharedInstance.anonymousId = TTUtil.getOrGenAnoId(context, forceGenerateAnoId);
+            sharedInstance.externalId = null;
+            sharedInstance.externalUserName = null;
+            sharedInstance.phoneNumber = null;
+            sharedInstance.email = null;
+            sharedInstance.isIdentified = false;
+        }
+    }
+
+    public String getAnonymousId() {
+        return TTTrackingConsent.isGranted() ? anonymousId : null;
+    }
+
+    public static void clear() {
+        sharedInstance.anonymousId = null;
         sharedInstance.externalId = null;
         sharedInstance.externalUserName = null;
         sharedInstance.phoneNumber = null;
@@ -44,70 +61,97 @@ public class TTUserInfo implements Cloneable, Serializable {
     }
 
     public void setIdentified() {
-        this.isIdentified = true;
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isGranted()) return;
+
+            this.isIdentified = true;
+        }
     }
 
     public void setExternalId(String externalId) {
-        if (DecryptUtil.isSHA256(externalId)) {
-            this.externalId = externalId;
-        } else {
-            this.externalId = DecryptUtil.toSha256(externalId);
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isGranted()) return;
+
+            if (DecryptUtil.isSHA256(externalId)) {
+                this.externalId = externalId;
+            } else {
+                this.externalId = DecryptUtil.toSha256(externalId);
+            }
         }
     }
 
     public void setExternalUserName(String externalUserName) {
-        if (DecryptUtil.isSHA256(externalUserName)) {
-            this.externalUserName = externalUserName;
-        } else {
-            this.externalUserName = DecryptUtil.toSha256(externalUserName);
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isGranted()) return;
+
+            if (DecryptUtil.isSHA256(externalUserName)) {
+                this.externalUserName = externalUserName;
+            } else {
+                this.externalUserName = DecryptUtil.toSha256(externalUserName);
+            }
         }
     }
 
     public void setPhoneNumber(String phoneNumber) {
-        if (DecryptUtil.isSHA256(phoneNumber)) {
-            this.phoneNumber = phoneNumber;
-        } else {
-            this.phoneNumber = DecryptUtil.toSha256(phoneNumber);
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isGranted()) return;
+
+            if (DecryptUtil.isSHA256(phoneNumber)) {
+                this.phoneNumber = phoneNumber;
+            } else {
+                this.phoneNumber = DecryptUtil.toSha256(phoneNumber);
+            }
         }
     }
 
     public void setEmail(String email) {
-        if (DecryptUtil.isSHA256(email)) {
-            this.email = email;
-        } else {
-            this.email = DecryptUtil.toSha256(email);
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isGranted()) return;
+
+            if (DecryptUtil.isSHA256(email)) {
+                this.email = email;
+            } else {
+                this.email = DecryptUtil.toSha256(email);
+            }
         }
     }
 
     public JSONObject toJsonObject() {
-        JSONObject jsonObject = JSON.build();
-        try {
-            if (externalId != null) {
-                JSON.putObject(jsonObject, "external_id", externalId);
-            }
-            if (externalUserName != null) {
-                JSON.putObject(jsonObject, "external_username", externalUserName);
-            }
-            if (phoneNumber != null) {
-                JSON.putObject(jsonObject, "phone_number", phoneNumber);
-            }
-            if (email != null) {
-                JSON.putObject(jsonObject, "email", email);
-            }
-        } catch (Throwable e) {
-            TTCrashHandler.handleCrash(TAG, e, TTSDK_EXCEPTION_SDK_CATCH);
-        }
-        return jsonObject;
-    }
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isGranted()) return JSON.build();
 
+            JSONObject jsonObject = JSON.build();
+            try {
+                if (externalId != null) {
+                    JSON.putObject(jsonObject, "external_id", externalId);
+                }
+                if (externalUserName != null) {
+                    JSON.putObject(jsonObject, "external_username", externalUserName);
+                }
+                if (phoneNumber != null) {
+                    JSON.putObject(jsonObject, "phone_number", phoneNumber);
+                }
+                if (email != null) {
+                    JSON.putObject(jsonObject, "email", email);
+                }
+            } catch (Throwable e) {
+                TTCrashHandler.handleCrash(TAG, e, TTSDK_EXCEPTION_SDK_CATCH);
+            }
+            return jsonObject;
+        }
+    }
 
     // Since there are no composition in this class, should be fairly safe
     // to do the default cloning
     public TTUserInfo clone() {
-        try {
-            return (TTUserInfo) super.clone();
-        } catch (Throwable ignore) {
-            return new TTUserInfo();
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isGranted()) return new TTUserInfo();
+
+            try {
+                return (TTUserInfo) super.clone();
+            } catch (Throwable ignore) {
+                return new TTUserInfo();
+            }
         }
     }
 }

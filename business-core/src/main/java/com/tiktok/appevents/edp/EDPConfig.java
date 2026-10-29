@@ -9,6 +9,7 @@ import android.text.TextUtils;
 
 import com.tiktok.TikTokBusinessSdk;
 import com.tiktok.util.JSON;
+import com.tiktok.util.TTTrackingConsent;
 import com.tiktok.util.TTUtil;
 
 import org.json.JSONArray;
@@ -36,7 +37,8 @@ public class EDPConfig {
         String SENSIG_FILTERING_REGEX_VERSION = "sensig_filtering_regex_version";
     }
 
-    public static final String DEFAULT_SENSIG_FILTERING_REGEX_LIST = "([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\\.[a-zA-Z0-9._-]+)|(\\+?0?86-?)?1[3-9]\\d{9}|(\\+\\d{1,2}\\s?)?\\(?\\d{3}\\)?[\\s.-]?\\d{3}[\\s.-]?\\d{4}";
+    public static final String DEFAULT_SENSIG_FILTERING_REGEX_LIST =
+            "([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\\.[a-zA-Z0-9._-]+)|(\\+?0?86-?)?1[3-9]\\d{9}|(\\+\\d{1,2}\\s?)?\\(?\\d{3}\\)?[\\s.-]?\\d{3}[\\s.-]?\\d{4}";
     public static volatile boolean enable_sdk = false;
     public static volatile boolean enable_app_launch_track = false;
     public static volatile boolean enable_page_show_track = false;
@@ -51,50 +53,94 @@ public class EDPConfig {
     public static volatile int sensig_filtering_regex_version = 0;
     public static volatile boolean enable_sync_get_touch_info = false;
 
-    public static void optConfig(JSONObject config) {
-        if (config == null) {
-            return;
-        }
-        try {
-            enable_sdk = JSON.getBoolean(config, ConfigConst.ENABLE_SDK, false);
-            enable_app_launch_track = enable_sdk && JSON.getBoolean(config, ConfigConst.ENABLE_APP_LAUNCH_TRACK, false);
-            enable_page_show_track = enable_sdk && JSON.getBoolean(config, ConfigConst.ENABLE_PAGE_SHOW_TRACK, false);
-            enable_click_track = enable_sdk && JSON.getBoolean(config, ConfigConst.ENABLE_CLICK_TRACK, false);
-            enable_webview_request_track = enable_sdk && JSON.getBoolean(config, ConfigConst.ENABLE_WEBVIEW_REQUEST_TRACK, false);
-            enable_pay_show_track = enable_sdk && JSON.getBoolean(config, ConfigConst.ENABLE_PAY_SHOW_TRACK, false);
-            page_detail_upload_deep_count = JSON.getInt(config, ConfigConst.PAGE_DETAIL_UPLOAD_DEEP_COUNT, 0);
-            time_diff_frequency_control = JSON.getDouble(config, ConfigConst.TIME_DIFF_FREQUENCY_CONTROL, 0);
-            report_frequency_control = JSON.getDouble(config, ConfigConst.REPORT_FREQUENCY_CONTROL, 0.0);
-            enable_sync_get_touch_info = config.optBoolean(ConfigConst.ENABLE_SYNC_GET_TOUCH_POSITION, false);
-            JSONArray buttonBlackList = JSON.getJsonArray(config, ConfigConst.BUTTON_BLACK_LIST);
-            button_black_list.clear();
-            if (buttonBlackList != null) {
-                final int count = buttonBlackList.length();
-                for (int i = 0; i < count; i++) {
-                    try {
-                        final String btn = buttonBlackList.getString(i);
-                        if (!TextUtils.isEmpty(btn)) {
-                            button_black_list.add(btn);
-                        }
-                    } catch (Throwable ignore) {
-                    }
-                }
-            }
+    public static void clear() {
+        enable_sdk = false;
+        enable_app_launch_track = false;
+        enable_page_show_track = false;
+        enable_click_track = false;
+        enable_webview_request_track = false;
+        enable_pay_show_track = false;
+        enable_sync_get_touch_info = false;
+        button_black_list.clear();
+        sensig_filtering_regex_list = DEFAULT_SENSIG_FILTERING_REGEX_LIST;
+        sensig_filtering_regex_version = 0;
+    }
 
+    public static void optConfig(JSONObject config) {
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isGranted()) return;
+
+            if (config == null) {
+                return;
+            }
             try {
-                JSONArray sensigFilteringRegexList = JSON.getJsonArray(config, ConfigConst.SENSIG_FILTERING_REGEX_LIST);
-                if (sensigFilteringRegexList != null) {
-                    final String regexStr = sensigFilteringRegexList.getString(0);
-                    if (!TextUtils.isEmpty(regexStr)) {
-                        sensig_filtering_regex_list = regexStr;
-                        sensig_filtering_regex_version = JSON.getInt(config, ConfigConst.SENSIG_FILTERING_REGEX_VERSION);
-                        TTUtil.setSensigInfo(TikTokBusinessSdk.getApplicationContext(), new Sensig(sensig_filtering_regex_version, sensig_filtering_regex_list));
+                enable_sdk =
+                        TikTokBusinessSdk.isEdpEnable()
+                                && JSON.getBoolean(config, ConfigConst.ENABLE_SDK, false);
+                enable_app_launch_track =
+                        enable_sdk
+                                && JSON.getBoolean(
+                                        config, ConfigConst.ENABLE_APP_LAUNCH_TRACK, false);
+                enable_page_show_track =
+                        enable_sdk
+                                && JSON.getBoolean(
+                                        config, ConfigConst.ENABLE_PAGE_SHOW_TRACK, false);
+                enable_click_track =
+                        enable_sdk
+                                && JSON.getBoolean(config, ConfigConst.ENABLE_CLICK_TRACK, false);
+                enable_webview_request_track =
+                        enable_sdk
+                                && JSON.getBoolean(
+                                        config, ConfigConst.ENABLE_WEBVIEW_REQUEST_TRACK, false);
+                enable_pay_show_track =
+                        enable_sdk
+                                && JSON.getBoolean(
+                                        config, ConfigConst.ENABLE_PAY_SHOW_TRACK, false);
+                page_detail_upload_deep_count =
+                        JSON.getInt(config, ConfigConst.PAGE_DETAIL_UPLOAD_DEEP_COUNT, 0);
+                time_diff_frequency_control =
+                        JSON.getDouble(config, ConfigConst.TIME_DIFF_FREQUENCY_CONTROL, 0);
+                report_frequency_control =
+                        JSON.getDouble(config, ConfigConst.REPORT_FREQUENCY_CONTROL, 0.0);
+                enable_sync_get_touch_info =
+                        config.optBoolean(ConfigConst.ENABLE_SYNC_GET_TOUCH_POSITION, false);
+                JSONArray buttonBlackList =
+                        JSON.getJsonArray(config, ConfigConst.BUTTON_BLACK_LIST);
+                button_black_list.clear();
+                if (buttonBlackList != null) {
+                    final int count = buttonBlackList.length();
+                    for (int i = 0; i < count; i++) {
+                        try {
+                            final String btn = buttonBlackList.getString(i);
+                            if (!TextUtils.isEmpty(btn)) {
+                                button_black_list.add(btn);
+                            }
+                        } catch (Throwable ignore) {
+                        }
                     }
                 }
+
+                try {
+                    JSONArray sensigFilteringRegexList =
+                            JSON.getJsonArray(config, ConfigConst.SENSIG_FILTERING_REGEX_LIST);
+                    if (sensigFilteringRegexList != null) {
+                        final String regexStr = sensigFilteringRegexList.getString(0);
+                        if (!TextUtils.isEmpty(regexStr)) {
+                            sensig_filtering_regex_list = regexStr;
+                            sensig_filtering_regex_version =
+                                    JSON.getInt(config, ConfigConst.SENSIG_FILTERING_REGEX_VERSION);
+                            TTUtil.setSensigInfo(
+                                    TikTokBusinessSdk.getApplicationContext(),
+                                    new Sensig(
+                                            sensig_filtering_regex_version,
+                                            sensig_filtering_regex_list));
+                        }
+                    }
+                } catch (Throwable ignore) {
+                }
+
             } catch (Throwable ignore) {
             }
-
-        } catch (Throwable ignore) {
         }
     }
 }

@@ -2,6 +2,7 @@ package com.tiktok.appevents;
 
 import com.tiktok.TikTokBusinessSdk;
 import com.tiktok.util.JSON;
+import com.tiktok.util.TTTrackingConsent;
 
 import org.json.JSONObject;
 
@@ -22,23 +23,31 @@ class DebugModeHelper {
 
         try {
             JSONObject result = TTRequest.getDebugModeConfig();
+            synchronized (TTTrackingConsent.LOCK) {
+                if (!TTTrackingConsent.isGranted()) return;
 
-            sIsSuccess = result != null && result.has("enable_debug_mode");
+                sIsSuccess = result != null && result.has("enable_debug_mode");
 
-            boolean enableDebugMode = JSON.getBoolean(result, "enable_debug_mode", false);
+                boolean enableDebugMode = JSON.getBoolean(result, "enable_debug_mode", false);
 
-            if (enableDebugMode) {
-                TikTokBusinessSdk.enableDebugMode();
-            } else {
-                TikTokBusinessSdk.disableDebugMode();
+                if (enableDebugMode) {
+                    TikTokBusinessSdk.enableDebugMode();
+                } else {
+                    TikTokBusinessSdk.disableDebugMode();
+                }
+
+                enableScreenshot.set(JSON.getBoolean(result, "enable_screenshot", false));
             }
-
-            enableScreenshot.set(JSON.getBoolean(result, "enable_screenshot", false));
         } catch (Throwable ignore) {
         }
     }
 
     public static boolean enableScreenshot() {
-        return enableScreenshot.get();
+        return TTTrackingConsent.isGranted() && enableScreenshot.get();
+    }
+
+    static void clear() {
+        sIsSuccess = false;
+        enableScreenshot.set(false);
     }
 }

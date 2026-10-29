@@ -11,6 +11,8 @@ import android.graphics.Canvas;
 import android.util.Base64;
 import android.view.View;
 
+import com.tiktok.util.TTTrackingConsent;
+
 import java.io.ByteArrayOutputStream;
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -32,17 +34,29 @@ public class TTAppEvent implements Serializable {
     private Date timeStamp;
     private String propertiesJson;
     private String eventId;
+    private String transportEventId;
     private Boolean isEdp;
     private static final AtomicLong counter = new AtomicLong(new Date().getTime());
     private final Long uniqueId;
     private final TTUserInfo userInfo;
     private String screenShot;
 
-    TTAppEvent(TTAppEventType type, String eventName, String propertiesJson, String eventId, String[] ttAppId) {
+    TTAppEvent(
+            TTAppEventType type,
+            String eventName,
+            String propertiesJson,
+            String eventId,
+            String[] ttAppId) {
         this(type, eventName, new Date(), propertiesJson, eventId, ttAppId);
     }
 
-    TTAppEvent(TTAppEventType type, String eventName, Date timeStamp, String propertiesJson, String eventId, String[] ttAppId) {
+    TTAppEvent(
+            TTAppEventType type,
+            String eventName,
+            Date timeStamp,
+            String propertiesJson,
+            String eventId,
+            String[] ttAppId) {
         this.type = type;
         this.eventName = eventName;
         this.timeStamp = timeStamp;
@@ -93,6 +107,17 @@ public class TTAppEvent implements Serializable {
         return eventId;
     }
 
+    synchronized String getTransportEventId() {
+        // Populate lazily for events persisted by upstream versions before this field existed.
+        if (transportEventId == null) {
+            transportEventId =
+                    eventId == null || eventId.isEmpty()
+                            ? java.util.UUID.randomUUID().toString()
+                            : eventId;
+        }
+        return transportEventId;
+    }
+
     public void setEventId(String eventId) {
         this.eventId = eventId;
     }
@@ -122,27 +147,42 @@ public class TTAppEvent implements Serializable {
     }
 
     public void setScreenShot() {
-        try {
-            View view = TTLifecycleListener.getActivityRef().get().getWindow().getDecorView();
-            Bitmap bitmap = Bitmap.createBitmap(view.getWidth(), view.getHeight(), Bitmap.Config.RGB_565);
-            Canvas canvas = new Canvas(bitmap);
-            view.draw(canvas);
-            ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 5, outputStream);
-            this.screenShot = Base64.encodeToString(outputStream.toByteArray(), Base64.NO_WRAP);
-        } catch (Throwable ignore) {
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isGranted()) return;
+
+            try {
+                View view = TTLifecycleListener.getActivityRef().get().getWindow().getDecorView();
+                Bitmap bitmap =
+                        Bitmap.createBitmap(
+                                view.getWidth(), view.getHeight(), Bitmap.Config.RGB_565);
+                Canvas canvas = new Canvas(bitmap);
+                view.draw(canvas);
+                ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 5, outputStream);
+                this.screenShot = Base64.encodeToString(outputStream.toByteArray(), Base64.NO_WRAP);
+            } catch (Throwable ignore) {
+            }
         }
     }
 
     @Override
     public String toString() {
-        return "TTAppEvent{" +
-                "eventName='" + eventName + '\'' +
-                ", timeStamp=" + timeStamp +
-                ", propertiesJson='" + propertiesJson + '\'' +
-                ", eventId='" + eventId + '\'' +
-                ", uniqueId=" + uniqueId +
-                ", tiktokAppIds=" + tiktokAppIds +
-                '}';
+        return "TTAppEvent{"
+                + "eventName='"
+                + eventName
+                + '\''
+                + ", timeStamp="
+                + timeStamp
+                + ", propertiesJson='"
+                + propertiesJson
+                + '\''
+                + ", eventId='"
+                + eventId
+                + '\''
+                + ", uniqueId="
+                + uniqueId
+                + ", tiktokAppIds="
+                + tiktokAppIds
+                + '}';
     }
 }

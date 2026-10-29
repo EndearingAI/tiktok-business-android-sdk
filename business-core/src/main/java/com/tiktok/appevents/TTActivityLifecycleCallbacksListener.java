@@ -11,6 +11,7 @@ import androidx.lifecycle.LifecycleOwner;
 
 import com.tiktok.iap.TTInAppPurchaseWrapper;
 import com.tiktok.util.JSON;
+import com.tiktok.util.TTTrackingConsent;
 import com.tiktok.util.TTUtil;
 
 import org.json.JSONObject;
@@ -30,29 +31,44 @@ class TTActivityLifecycleCallbacksListener extends TTLifeCycleCallbacksAdapter {
 
     @Override
     public void onResume(@NonNull LifecycleOwner owner) {
-        if (isPaused) {
-            reportBackground(bgStart);
-            fgStart = System.currentTimeMillis();
-            appEventLogger.fetchGlobalConfig(0);
-            appEventLogger.restartScheduler();
-            appEventLogger.autoEventsManager.track2DayRetentionEvent();
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isGranted()) return;
+
+            if (!appEventLogger.isActive()) return;
+            if (isPaused) {
+                reportBackground(bgStart);
+                fgStart = System.currentTimeMillis();
+                appEventLogger.fetchGlobalConfig(0);
+                appEventLogger.restartScheduler();
+                appEventLogger.autoEventsManager.track2DayRetentionEvent();
+            }
+            isPaused = false;
         }
-        isPaused = false;
     }
 
     @Override
     public void onPause(@NonNull LifecycleOwner owner) {
-        reportForeground(fgStart);
-        bgStart = System.currentTimeMillis();
-        appEventLogger.stopScheduler();
-        isPaused = true;
-        TTInAppPurchaseWrapper.registerIapTrack();
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isGranted()) return;
+
+            if (!appEventLogger.isActive()) return;
+            reportForeground(fgStart);
+            bgStart = System.currentTimeMillis();
+            appEventLogger.stopScheduler();
+            isPaused = true;
+            TTInAppPurchaseWrapper.registerIapTrack();
+        }
     }
 
     @Override
     public void onStop(@NonNull LifecycleOwner owner) {
-        appEventLogger.persistEvents();
-        appEventLogger.persistMonitor();
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isGranted()) return;
+
+            if (!appEventLogger.isActive()) return;
+            appEventLogger.persistEvents();
+            appEventLogger.persistMonitor();
+        }
     }
 
     // TODO might never be called as per Android's doc
@@ -85,4 +101,3 @@ class TTActivityLifecycleCallbacksListener extends TTLifeCycleCallbacksAdapter {
         return isPaused;
     }
 }
-

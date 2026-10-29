@@ -8,6 +8,7 @@ apply plugin: 'com.android.library'
 apply plugin: 'maven-publish'
 
 android {
+    namespace 'com.tiktok'
     compileSdkVersion rootProject.ext.compileSdkVersion
 
     defaultConfig {
@@ -45,6 +46,22 @@ android {
         sourceCompatibility = 1.8
         targetCompatibility = 1.8
     }
+
+    testOptions {
+        unitTests.includeAndroidResources = true
+        unitTests.all {
+            jvmArgs '--add-opens=java.base/java.lang=ALL-UNNAMED',
+                    '--add-opens=java.base/java.util=ALL-UNNAMED',
+                    '--add-opens=java.base/java.util.concurrent=ALL-UNNAMED',
+                    '--add-opens=java.base/java.lang.reflect=ALL-UNNAMED'
+        }
+    }
+
+    publishing {
+        singleVariant('release') {
+            withSourcesJar()
+        }
+    }
 }
 
 dependencies {
@@ -57,6 +74,9 @@ dependencies {
     compileOnly('com.android.installreferrer:installreferrer:2.2')
 
     testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.14.1'
+    testImplementation 'com.squareup.okhttp3:mockwebserver:4.12.0'
+    testImplementation 'com.android.installreferrer:installreferrer:2.2'
 
     def powerMockVersion = '2.0.9'
     testImplementation "org.powermock:powermock-api-mockito2:$powerMockVersion"
@@ -76,9 +96,9 @@ afterEvaluate {
                 from components.release
 
                 // You can then customize attributes of the publication as shown below.
-                groupId = mavenGroupId
+                groupId = findProperty('forkPublicationGroup') ?: mavenGroupId
                 artifactId = mavenArtifactId
-                version = VERSION_NAME
+                version = findProperty('forkPublicationVersion') ?: VERSION_NAME
             }
         }
     }

@@ -16,6 +16,7 @@ import com.android.billingclient.api.PurchasesResponseListener;
 import com.android.billingclient.api.PurchasesUpdatedListener;
 import com.android.billingclient.api.QueryProductDetailsParams;
 import com.android.billingclient.api.QueryPurchasesParams;
+
 import com.tiktok.TikTokBusinessSdk;
 import com.tiktok.appevents.TTPurchaseInfo;
 import com.tiktok.appevents.edp.EDPConfig;
@@ -25,6 +26,7 @@ import com.tiktok.iap.billing.GPBillVersions;
 import com.tiktok.iap.billing.model.TTPayData;
 import com.tiktok.util.JSON;
 import com.tiktok.util.TTLogger;
+import com.tiktok.util.TTTrackingConsent;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -41,7 +43,31 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 class V8BillingProxy implements IBillingProxy {
-    private static final TTLogger ttLogger = new TTLogger("BillingProxyV8", TikTokBusinessSdk.getLogLevel());
+    private static final TTLogger ttLogger =
+            new TTLogger("BillingProxyV8", TikTokBusinessSdk.getLogLevel());
+
+    private final long consentGeneration = TTTrackingConsent.capture();
+    private volatile boolean closed;
+
+    private boolean isConsentCurrent() {
+        return !closed
+                && TTTrackingConsent.isCurrent(consentGeneration)
+                && TikTokBusinessSdk.enableAutoIapTrack();
+    }
+
+    @Override
+    public void close() {
+        closed = true;
+        mIsInitLoading.set(false);
+        mInitSuccess.set(false);
+        if (mBillingClient != null) {
+            mBillingClient.endConnection();
+            mBillingClient = null;
+        }
+        mHistorySubs.clear();
+        mHistoryInApp.clear();
+        mProductDetails.clear();
+    }
 
     private final AtomicBoolean mIsInitLoading = new AtomicBoolean(false);
     private final AtomicBoolean mInitSuccess = new AtomicBoolean(false);
@@ -52,14 +78,20 @@ class V8BillingProxy implements IBillingProxy {
     private final Map<String, TTPayData> mHistoryInApp = new ConcurrentHashMap<>();
     private final Map<String, JSONObject> mProductDetails = new ConcurrentHashMap<>();
 
-    private final PurchasesUpdatedListener mUpdateListener = new PurchasesUpdatedListener() {
-        @Override
-        public void onPurchasesUpdated(@NonNull BillingResult billingResult, @Nullable List<Purchase> list) {
-            sendPageShow(billingResult, list);
-            sendPurchase(billingResult, list);
-            ttLogger.info("on billing result: " + String.valueOf(billingResult));
-        }
-    };
+    private final PurchasesUpdatedListener mUpdateListener =
+            new PurchasesUpdatedListener() {
+                @Override
+                public void onPurchasesUpdated(
+                        @NonNull BillingResult billingResult, @Nullable List<Purchase> list) {
+                    synchronized (TTTrackingConsent.LOCK) {
+                        if (!isConsentCurrent()) return;
+
+                        sendPageShow(billingResult, list);
+                        sendPurchase(billingResult, list);
+                        ttLogger.info("on billing result: " + String.valueOf(billingResult));
+                    }
+                }
+            };
 
     public V8BillingProxy(GPBillVersions.GPBillingVer ver) {
         mBillingVersion = ver;
@@ -72,23 +104,31 @@ class V8BillingProxy implements IBillingProxy {
 
     @Override
     public void init() {
-        tryCreateAndStartBillingClient();
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
+
+            tryCreateAndStartBillingClient();
+        }
     }
 
     @Override
     public void queryPurchaseHistory() {
-        if (!TTInAppPurchaseWrapper.autoTrackPaymentHistory) {
-            return;
-        }
-        if (!isStartSuccess()) {
-            tryCreateAndStartBillingClient();
-            return;
-        }
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
 
-        try {
-            doQueryPurchaseHistory();
-            TTInAppPurchaseWrapper.hasReportedHistoryInLife = true;
-        } catch (Throwable ignore) {
+            if (!TTInAppPurchaseWrapper.autoTrackPaymentHistory) {
+                return;
+            }
+            if (!isStartSuccess()) {
+                tryCreateAndStartBillingClient();
+                return;
+            }
+
+            try {
+                doQueryPurchaseHistory();
+                TTInAppPurchaseWrapper.hasReportedHistoryInLife = true;
+            } catch (Throwable ignore) {
+            }
         }
     }
 
@@ -97,84 +137,116 @@ class V8BillingProxy implements IBillingProxy {
     }
 
     private void sendPurchase(BillingResult billingResult, List<Purchase> list) {
-        if (billingResult == null || list == null
-                || billingResult.getResponseCode() != BillingClient.BillingResponseCode.OK) {
-            return;
-        }
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
 
-        if (isAutoIAPTrackEnable()) {
-            for (Purchase purchase : list) {
-                if (purchase == null) {
-                    continue;
-                }
-                List<String> productIds = purchase.getProducts();
-                if (productIds == null || productIds.isEmpty()) {
-                    continue;
-                }
-                queryProductDetailsAndTrack(productIds, purchase, true);
-            }
-        }
-    }
-
-    private void queryProductDetailsAndTrack(List<String> productIds, Purchase purchase, boolean isInAppPurchase) {
-        try {
-            QueryProductDetailsParams params = buildProductDetailsParams(productIds, isInAppPurchase);
-            if (params == null) {
-                sendNoSkuIapTrack(productIds, purchase);
+            if (billingResult == null
+                    || list == null
+                    || billingResult.getResponseCode() != BillingClient.BillingResponseCode.OK) {
                 return;
             }
-            mBillingClient.queryProductDetailsAsync(params, (billingResult, result) -> {
-                try {
-                    List<ProductDetails> detailList = result == null ? null : result.getProductDetailsList();
-                    if (billingResult != null && billingResult.getResponseCode() == BillingClient.BillingResponseCode.OK
-                            && detailList != null && !detailList.isEmpty()) {
-                        List<TTPurchaseInfo> purchaseInfos = new ArrayList<>();
-                        Set<String> resolvedIds = new HashSet<>();
-                        for (ProductDetails detail : detailList) {
-                            try {
-                                JSONObject detailJson = V8ProductDetailCompat.toCompatDetailJson(detail, !isInAppPurchase);
-                                if (detailJson == null || detailJson.length() == 0) {
-                                    continue;
-                                }
-                                TTPurchaseInfo purchaseInfo = new TTPurchaseInfo(buildPurchaseJson(purchase, detail.getProductId()), detailJson);
-                                purchaseInfo.setAutoTrack(true);
-                                purchaseInfo.setSubs(!isInAppPurchase);
-                                purchaseInfos.add(purchaseInfo);
-                                resolvedIds.add(detail.getProductId());
-                            } catch (Throwable ignore) {
-                            }
-                        }
-                        if (!purchaseInfos.isEmpty()) {
-                            TikTokBusinessSdk.trackGooglePlayPurchase(purchaseInfos);
-                        }
-                        List<String> unresolvedIds = getUnresolvedProductIds(productIds, resolvedIds);
-                        if (unresolvedIds.isEmpty()) {
-                            return;
-                        }
-                        if (isInAppPurchase) {
-                            queryProductDetailsAndTrack(unresolvedIds, purchase, false);
-                        } else {
-                            sendNoSkuIapTrack(unresolvedIds, purchase);
-                        }
-                        return;
+
+            if (isAutoIAPTrackEnable()) {
+                for (Purchase purchase : list) {
+                    if (purchase == null) {
+                        continue;
                     }
-                    if (isInAppPurchase) {
-                        queryProductDetailsAndTrack(productIds, purchase, false);
-                    } else {
-                        sendNoSkuIapTrack(productIds, purchase);
+                    List<String> productIds = purchase.getProducts();
+                    if (productIds == null || productIds.isEmpty()) {
+                        continue;
                     }
-                } catch (Throwable e) {
-                    ttLogger.error(e, "query ProductDetails And Track error");
-                    sendNoSkuIapTrack(productIds, purchase);
+                    queryProductDetailsAndTrack(productIds, purchase, true);
                 }
-            });
-        } catch (Throwable e) {
-            ttLogger.error(e, "query ProductDetails And Track error2");
-            sendNoSkuIapTrack(productIds, purchase);
+            }
         }
     }
 
-    private QueryProductDetailsParams buildProductDetailsParams(List<String> productIds, boolean isInAppPurchase) {
+    private void queryProductDetailsAndTrack(
+            List<String> productIds, Purchase purchase, boolean isInAppPurchase) {
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
+
+            try {
+                QueryProductDetailsParams params =
+                        buildProductDetailsParams(productIds, isInAppPurchase);
+                if (params == null) {
+                    sendNoSkuIapTrack(productIds, purchase);
+                    return;
+                }
+                mBillingClient.queryProductDetailsAsync(
+                        params,
+                        (billingResult, result) -> {
+                            synchronized (TTTrackingConsent.LOCK) {
+                                if (!isConsentCurrent()) return;
+                                try {
+                                    List<ProductDetails> detailList =
+                                            result == null ? null : result.getProductDetailsList();
+                                    if (billingResult != null
+                                            && billingResult.getResponseCode()
+                                                    == BillingClient.BillingResponseCode.OK
+                                            && detailList != null
+                                            && !detailList.isEmpty()) {
+                                        List<TTPurchaseInfo> purchaseInfos = new ArrayList<>();
+                                        Set<String> resolvedIds = new HashSet<>();
+                                        for (ProductDetails detail : detailList) {
+                                            try {
+                                                JSONObject detailJson =
+                                                        V8ProductDetailCompat.toCompatDetailJson(
+                                                                detail, !isInAppPurchase);
+                                                if (detailJson == null
+                                                        || detailJson.length() == 0) {
+                                                    continue;
+                                                }
+                                                TTPurchaseInfo purchaseInfo =
+                                                        new TTPurchaseInfo(
+                                                                buildPurchaseJson(
+                                                                        purchase,
+                                                                        detail.getProductId()),
+                                                                detailJson);
+                                                purchaseInfo.setAutoTrack(true);
+                                                purchaseInfo.setSubs(!isInAppPurchase);
+                                                purchaseInfos.add(purchaseInfo);
+                                                resolvedIds.add(detail.getProductId());
+                                            } catch (Throwable ignore) {
+                                            }
+                                        }
+                                        if (!purchaseInfos.isEmpty()) {
+                                            TikTokBusinessSdk.trackGooglePlayPurchase(
+                                                    purchaseInfos);
+                                        }
+                                        List<String> unresolvedIds =
+                                                getUnresolvedProductIds(productIds, resolvedIds);
+                                        if (unresolvedIds.isEmpty()) {
+                                            return;
+                                        }
+                                        if (isInAppPurchase) {
+                                            queryProductDetailsAndTrack(
+                                                    unresolvedIds, purchase, false);
+                                        } else {
+                                            sendNoSkuIapTrack(unresolvedIds, purchase);
+                                        }
+                                        return;
+                                    }
+                                    if (isInAppPurchase) {
+                                        queryProductDetailsAndTrack(productIds, purchase, false);
+                                    } else {
+                                        sendNoSkuIapTrack(productIds, purchase);
+                                    }
+                                } catch (Throwable e) {
+                                    ttLogger.error(e, "query ProductDetails And Track error");
+                                    sendNoSkuIapTrack(productIds, purchase);
+                                }
+                            }
+                        });
+            } catch (Throwable e) {
+                ttLogger.error(e, "query ProductDetails And Track error2");
+                sendNoSkuIapTrack(productIds, purchase);
+            }
+        }
+    }
+
+    private QueryProductDetailsParams buildProductDetailsParams(
+            List<String> productIds, boolean isInAppPurchase) {
         if (productIds == null || productIds.isEmpty()) {
             return null;
         }
@@ -184,17 +256,19 @@ class V8BillingProxy implements IBillingProxy {
             if (TextUtils.isEmpty(productId)) {
                 continue;
             }
-            products.add(QueryProductDetailsParams.Product.newBuilder()
-                    .setProductId(productId)
-                    .setProductType(isInAppPurchase ? BillingClient.ProductType.INAPP : BillingClient.ProductType.SUBS)
-                    .build());
+            products.add(
+                    QueryProductDetailsParams.Product.newBuilder()
+                            .setProductId(productId)
+                            .setProductType(
+                                    isInAppPurchase
+                                            ? BillingClient.ProductType.INAPP
+                                            : BillingClient.ProductType.SUBS)
+                            .build());
         }
         if (products.isEmpty()) {
             return null;
         }
-        return QueryProductDetailsParams.newBuilder()
-                .setProductList(products)
-                .build();
+        return QueryProductDetailsParams.newBuilder().setProductList(products).build();
     }
 
     private JSONObject buildPurchaseJson(Purchase purchase, String productId) {
@@ -215,167 +289,211 @@ class V8BillingProxy implements IBillingProxy {
         return json;
     }
 
-    private static void sendNoSkuIapTrack(List<String> productIds, Purchase purchase) {
-        try {
-            JSONArray contents = JSON.buildArr();
-            for (String productId : productIds) {
-                if (TextUtils.isEmpty(productId)) {
-                    continue;
+    private void sendNoSkuIapTrack(List<String> productIds, Purchase purchase) {
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
+
+            try {
+                JSONArray contents = JSON.buildArr();
+                for (String productId : productIds) {
+                    if (TextUtils.isEmpty(productId)) {
+                        continue;
+                    }
+                    JSONObject item = JSON.build();
+                    JSON.putInt(item, "quantity", purchase == null ? 0 : purchase.getQuantity());
+                    JSON.putObject(item, "content_id", productId);
+                    JSON.putArr(contents, item);
                 }
-                JSONObject item = JSON.build();
-                JSON.putInt(item, "quantity", purchase == null ? 0 : purchase.getQuantity());
-                JSON.putObject(item, "content_id", productId);
-                JSON.putArr(contents, item);
+                JSONObject content = JSON.build();
+                JSON.putObject(content, "contents", contents);
+                TikTokBusinessSdk.trackEvent("Purchase", content);
+            } catch (Throwable e) {
+                ttLogger.error(e, "Track Purchase error");
             }
-            JSONObject content = JSON.build();
-            JSON.putObject(content, "contents", contents);
-            TikTokBusinessSdk.trackEvent("Purchase", content);
-        } catch (Throwable e) {
-            ttLogger.error(e, "Track Purchase error");
         }
     }
 
     private void sendPageShow(BillingResult billingResult, List<Purchase> list) {
-        if (billingResult == null || list == null) {
-            return;
-        }
-        try {
-            if (EDPConfig.enable_pay_show_track) {
-                JSONArray arrPurchase = JSON.buildArr();
-                for (Purchase purchase : list) {
-                    JSONObject json = JSON.build(purchase.getOriginalJson());
-                    JSON.putArr(arrPurchase, json);
-                }
-                TTEDPEventTrack.trackPayShow(billingResult.getResponseCode(), arrPurchase);
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
+
+            if (billingResult == null || list == null) {
+                return;
             }
-        } catch (Throwable ignore) {
+            try {
+                if (EDPConfig.enable_pay_show_track) {
+                    JSONArray arrPurchase = JSON.buildArr();
+                    for (Purchase purchase : list) {
+                        JSONObject json = JSON.build(purchase.getOriginalJson());
+                        JSON.putArr(arrPurchase, json);
+                    }
+                    TTEDPEventTrack.trackPayShow(billingResult.getResponseCode(), arrPurchase);
+                }
+            } catch (Throwable ignore) {
+            }
         }
     }
 
     private void doQueryPurchaseHistory() {
-        // Billing v8 no longer exposes the old purchase-history callback path.
-        // The accepted product trade-off here is to backfill from currently owned / active purchases only,
-        // while still preserving BillCache-based dedupe and trimming semantics on top of that narrower source set.
-        try {
-            if (TTInAppPurchaseWrapper.autoTrackPaymentHistory && TTInAppPurchaseWrapper.canTrackINAPP()) {
-                QueryPurchasesParams params = QueryPurchasesParams.newBuilder()
-                        .setProductType(BillingClient.ProductType.INAPP)
-                        .build();
-                mBillingClient.queryPurchasesAsync(params, new PurchasesResponseListener() {
-                    @Override
-                    public void onQueryPurchasesResponse(@NonNull BillingResult billingResult, @NonNull List<Purchase> list) {
-                        if (billingResult.getResponseCode() == BillingClient.BillingResponseCode.OK
-                                && TTInAppPurchaseWrapper.autoTrackPaymentHistory
-                                && TTInAppPurchaseWrapper.canTrackINAPP()) {
-                            queryProductDetailHistory(false, list);
-                        }
-                    }
-                });
-            }
-        } catch (Throwable e) {
-            ttLogger.error(e, "query v8 inapp error");
-        }
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
 
-        try {
-            if (TTInAppPurchaseWrapper.autoTrackPaymentHistory && TTInAppPurchaseWrapper.canTrackSUBS()) {
-                QueryPurchasesParams params = QueryPurchasesParams.newBuilder()
-                        .setProductType(BillingClient.ProductType.SUBS)
-                        .build();
-                mBillingClient.queryPurchasesAsync(params, new PurchasesResponseListener() {
-                    @Override
-                    public void onQueryPurchasesResponse(@NonNull BillingResult billingResult, @NonNull List<Purchase> list) {
-                        if (billingResult.getResponseCode() == BillingClient.BillingResponseCode.OK
-                                && TTInAppPurchaseWrapper.autoTrackPaymentHistory
-                                && TTInAppPurchaseWrapper.canTrackSUBS()) {
-                            queryProductDetailHistory(true, list);
-                        }
-                    }
-                });
+            // Billing v8 no longer exposes the old purchase-history callback path.
+            // The accepted product trade-off here is to backfill from currently owned / active
+            // purchases only,
+            // while still preserving BillCache-based dedupe and trimming semantics on top of that
+            // narrower source set.
+            try {
+                if (TTInAppPurchaseWrapper.autoTrackPaymentHistory
+                        && TTInAppPurchaseWrapper.canTrackINAPP()) {
+                    QueryPurchasesParams params =
+                            QueryPurchasesParams.newBuilder()
+                                    .setProductType(BillingClient.ProductType.INAPP)
+                                    .build();
+                    mBillingClient.queryPurchasesAsync(
+                            params,
+                            new PurchasesResponseListener() {
+                                @Override
+                                public void onQueryPurchasesResponse(
+                                        @NonNull BillingResult billingResult,
+                                        @NonNull List<Purchase> list) {
+                                    synchronized (TTTrackingConsent.LOCK) {
+                                        if (!isConsentCurrent()) return;
+
+                                        if (billingResult.getResponseCode()
+                                                        == BillingClient.BillingResponseCode.OK
+                                                && TTInAppPurchaseWrapper.autoTrackPaymentHistory
+                                                && TTInAppPurchaseWrapper.canTrackINAPP()) {
+                                            queryProductDetailHistory(false, list);
+                                        }
+                                    }
+                                }
+                            });
+                }
+            } catch (Throwable e) {
+                ttLogger.error(e, "query v8 inapp error");
             }
-        } catch (Throwable e) {
-            ttLogger.error(e, "query v8 subs error");
+
+            try {
+                if (TTInAppPurchaseWrapper.autoTrackPaymentHistory
+                        && TTInAppPurchaseWrapper.canTrackSUBS()) {
+                    QueryPurchasesParams params =
+                            QueryPurchasesParams.newBuilder()
+                                    .setProductType(BillingClient.ProductType.SUBS)
+                                    .build();
+                    mBillingClient.queryPurchasesAsync(
+                            params,
+                            new PurchasesResponseListener() {
+                                @Override
+                                public void onQueryPurchasesResponse(
+                                        @NonNull BillingResult billingResult,
+                                        @NonNull List<Purchase> list) {
+                                    synchronized (TTTrackingConsent.LOCK) {
+                                        if (!isConsentCurrent()) return;
+
+                                        if (billingResult.getResponseCode()
+                                                        == BillingClient.BillingResponseCode.OK
+                                                && TTInAppPurchaseWrapper.autoTrackPaymentHistory
+                                                && TTInAppPurchaseWrapper.canTrackSUBS()) {
+                                            queryProductDetailHistory(true, list);
+                                        }
+                                    }
+                                }
+                            });
+                }
+            } catch (Throwable e) {
+                ttLogger.error(e, "query v8 subs error");
+            }
         }
     }
 
     private void queryProductDetailHistory(boolean isSubs, List<Purchase> list) {
-        try {
-            if (list == null || list.isEmpty()) {
-                return;
-            }
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
 
-            List<String> idList = new ArrayList<>();
-            Set<String> added = new HashSet<>();
-            for (Purchase purchase : list) {
-                try {
-                    if (purchase == null) {
-                        continue;
-                    }
-                    List<String> products = purchase.getProducts();
-                    if (products == null || products.isEmpty()) {
-                        continue;
-                    }
-                    for (String productId : products) {
-                        if (TextUtils.isEmpty(productId)) {
+            try {
+                if (list == null || list.isEmpty()) {
+                    return;
+                }
+
+                List<String> idList = new ArrayList<>();
+                Set<String> added = new HashSet<>();
+                for (Purchase purchase : list) {
+                    try {
+                        if (purchase == null) {
                             continue;
                         }
-                        JSONObject json = buildPurchaseJson(purchase, productId);
-                        TTPayData pay = new TTPayData();
-                        pay.productId = productId;
-                        pay.data = json;
-                        pay.purchaseTime = purchase.getPurchaseTime();
-                        if (isSubs) {
-                            mHistorySubs.put(productId, pay);
-                        } else {
-                            mHistoryInApp.put(productId, pay);
+                        List<String> products = purchase.getProducts();
+                        if (products == null || products.isEmpty()) {
+                            continue;
                         }
-                        if (!mProductDetails.containsKey(productId) && added.add(productId)) {
-                            idList.add(productId);
+                        for (String productId : products) {
+                            if (TextUtils.isEmpty(productId)) {
+                                continue;
+                            }
+                            JSONObject json = buildPurchaseJson(purchase, productId);
+                            TTPayData pay = new TTPayData();
+                            pay.productId = productId;
+                            pay.data = json;
+                            pay.purchaseTime = purchase.getPurchaseTime();
+                            if (isSubs) {
+                                mHistorySubs.put(productId, pay);
+                            } else {
+                                mHistoryInApp.put(productId, pay);
+                            }
+                            if (!mProductDetails.containsKey(productId) && added.add(productId)) {
+                                idList.add(productId);
+                            }
                         }
+                    } catch (Throwable ignore) {
                     }
-                } catch (Throwable ignore) {
                 }
-            }
 
-            if (idList.isEmpty()) {
-                tryUploadHistoryLog();
-            } else {
-                doQueryProductDetails(isSubs, idList);
+                if (idList.isEmpty()) {
+                    tryUploadHistoryLog();
+                } else {
+                    doQueryProductDetails(isSubs, idList);
+                }
+            } catch (Throwable e) {
+                ttLogger.error(e, "query v8 product details error");
             }
-        } catch (Throwable e) {
-            ttLogger.error(e, "query v8 product details error");
         }
     }
 
     private void tryUploadHistoryLog() {
-        if (!TTInAppPurchaseWrapper.autoTrackPaymentHistory) {
-            return;
-        }
-        if (mHistorySubs.isEmpty() && mHistoryInApp.isEmpty() && mProductDetails.isEmpty()) {
-            return;
-        }
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
 
-        try {
-            if (TTInAppPurchaseWrapper.canTrackSUBS()) {
-                Map<String, TTPayData> map = new HashMap<>(mHistorySubs);
-                map = filterPurchase(true, map);
-                List<String> sentIds = sendHistoryLog(true, map);
-                for (String sentId : sentIds) {
-                    mHistorySubs.remove(sentId);
-                }
+            if (!TTInAppPurchaseWrapper.autoTrackPaymentHistory) {
+                return;
             }
-        } catch (Throwable ignore) {
-        }
+            if (mHistorySubs.isEmpty() && mHistoryInApp.isEmpty() && mProductDetails.isEmpty()) {
+                return;
+            }
 
-        try {
-            if (TTInAppPurchaseWrapper.canTrackINAPP()) {
-                Map<String, TTPayData> map = new HashMap<>(mHistoryInApp);
-                map = filterPurchase(false, map);
-                List<String> sentIds = sendHistoryLog(false, map);
-                for (String sentId : sentIds) {
-                    mHistoryInApp.remove(sentId);
+            try {
+                if (TTInAppPurchaseWrapper.canTrackSUBS()) {
+                    Map<String, TTPayData> map = new HashMap<>(mHistorySubs);
+                    map = filterPurchase(true, map);
+                    List<String> sentIds = sendHistoryLog(true, map);
+                    for (String sentId : sentIds) {
+                        mHistorySubs.remove(sentId);
+                    }
                 }
+            } catch (Throwable ignore) {
             }
-        } catch (Throwable ignore) {
+
+            try {
+                if (TTInAppPurchaseWrapper.canTrackINAPP()) {
+                    Map<String, TTPayData> map = new HashMap<>(mHistoryInApp);
+                    map = filterPurchase(false, map);
+                    List<String> sentIds = sendHistoryLog(false, map);
+                    for (String sentId : sentIds) {
+                        mHistoryInApp.remove(sentId);
+                    }
+                }
+            } catch (Throwable ignore) {
+            }
         }
     }
 
@@ -422,37 +540,49 @@ class V8BillingProxy implements IBillingProxy {
         return sentIds;
     }
 
-    private void checkDataAndAddNeedParam(JSONObject purchase, JSONObject detailJson, String productId) {
-        if (purchase != null) {
-            JSON.putObject(purchase, "productId", productId);
-            if (purchase.isNull("orderId")) {
-                JSON.putObject(purchase, "orderId", "");
+    private void checkDataAndAddNeedParam(
+            JSONObject purchase, JSONObject detailJson, String productId) {
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
+
+            if (purchase != null) {
+                JSON.putObject(purchase, "productId", productId);
+                if (purchase.isNull("orderId")) {
+                    JSON.putObject(purchase, "orderId", "");
+                }
+                if (purchase.isNull("quantity")) {
+                    JSON.putInt(purchase, "quantity", 1);
+                }
             }
-            if (purchase.isNull("quantity")) {
-                JSON.putInt(purchase, "quantity", 1);
-            }
-        }
-        if (detailJson != null) {
-            JSON.putObject(detailJson, "productId", productId);
-            if (detailJson.isNull("price")) {
-                JSON.putObject(detailJson, "price", "");
-            }
-            if (detailJson.isNull("price_amount_micros")) {
-                JSON.putLong(detailJson, "price_amount_micros", 0L);
-            }
-            if (detailJson.isNull("price_currency_code")) {
-                JSON.putObject(detailJson, "price_currency_code", "");
+            if (detailJson != null) {
+                JSON.putObject(detailJson, "productId", productId);
+                if (detailJson.isNull("price")) {
+                    JSON.putObject(detailJson, "price", "");
+                }
+                if (detailJson.isNull("price_amount_micros")) {
+                    JSON.putLong(detailJson, "price_amount_micros", 0L);
+                }
+                if (detailJson.isNull("price_currency_code")) {
+                    JSON.putObject(detailJson, "price_currency_code", "");
+                }
             }
         }
     }
 
     private Map<String, TTPayData> filterPurchase(boolean isSubs, Map<String, TTPayData> map) {
-        long last = isSubs ? BillCache.getInstance().getSUBSLast() : BillCache.getInstance().getINAPPLast();
-        int total = isSubs ? TTInAppPurchaseWrapper.autoTrackPaymentHistorySUBS : TTInAppPurchaseWrapper.autoTrackPaymentHistoryINAPP;
+        long last =
+                isSubs
+                        ? BillCache.getInstance().getSUBSLast()
+                        : BillCache.getInstance().getINAPPLast();
+        int total =
+                isSubs
+                        ? TTInAppPurchaseWrapper.autoTrackPaymentHistorySUBS
+                        : TTInAppPurchaseWrapper.autoTrackPaymentHistoryINAPP;
         return filterPurchaseByTimeAndLimit(map, last, total);
     }
 
-    static Map<String, TTPayData> filterPurchaseByTimeAndLimit(Map<String, TTPayData> map, long last, int total) {
+    static Map<String, TTPayData> filterPurchaseByTimeAndLimit(
+            Map<String, TTPayData> map, long last, int total) {
         Map<String, TTPayData> filterMap = new HashMap<>();
 
         try {
@@ -477,12 +607,16 @@ class V8BillingProxy implements IBillingProxy {
                     allPays.add(entry.getValue());
                 }
             }
-            Collections.sort(allPays, new Comparator<TTPayData>() {
-                @Override
-                public int compare(TTPayData o1, TTPayData o2) {
-                    return o1 == null || o2 == null ? 0 : Long.compare(o2.purchaseTime, o1.purchaseTime);
-                }
-            });
+            Collections.sort(
+                    allPays,
+                    new Comparator<TTPayData>() {
+                        @Override
+                        public int compare(TTPayData o1, TTPayData o2) {
+                            return o1 == null || o2 == null
+                                    ? 0
+                                    : Long.compare(o2.purchaseTime, o1.purchaseTime);
+                        }
+                    });
 
             filterMap = new HashMap<>();
             total = Math.min(allPays.size(), total);
@@ -502,44 +636,67 @@ class V8BillingProxy implements IBillingProxy {
     }
 
     private void doQueryProductDetails(boolean isSubs, List<String> idList) {
-        QueryProductDetailsParams params = buildProductDetailsParams(idList, !isSubs);
-        if (params == null) {
-            tryUploadHistoryLog();
-            return;
-        }
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
 
-        mBillingClient.queryProductDetailsAsync(params, new ProductDetailsResponseListener() {
-            @Override
-            public void onProductDetailsResponse(@NonNull BillingResult billingResult, @NonNull com.android.billingclient.api.QueryProductDetailsResult result) {
-                if (billingResult != null && billingResult.getResponseCode() == BillingClient.BillingResponseCode.OK) {
-                    List<ProductDetails> list = result.getProductDetailsList();
-                    if (list != null && !list.isEmpty()) {
-                        for (ProductDetails detail : list) {
-                            try {
-                                if (detail != null) {
-                                    JSONObject json = V8ProductDetailCompat.toCompatDetailJson(detail, isSubs);
-                                    if (json != null && json.length() > 0) {
-                                        checkDataAndAddNeedParam(null, json, detail.getProductId());
-                                        mProductDetails.put(detail.getProductId(), json);
+            QueryProductDetailsParams params = buildProductDetailsParams(idList, !isSubs);
+            if (params == null) {
+                tryUploadHistoryLog();
+                return;
+            }
+
+            mBillingClient.queryProductDetailsAsync(
+                    params,
+                    new ProductDetailsResponseListener() {
+                        @Override
+                        public void onProductDetailsResponse(
+                                @NonNull BillingResult billingResult,
+                                @NonNull
+                                        com.android.billingclient.api.QueryProductDetailsResult
+                                                result) {
+                            synchronized (TTTrackingConsent.LOCK) {
+                                if (!isConsentCurrent()) return;
+
+                                if (billingResult != null
+                                        && billingResult.getResponseCode()
+                                                == BillingClient.BillingResponseCode.OK) {
+                                    List<ProductDetails> list = result.getProductDetailsList();
+                                    if (list != null && !list.isEmpty()) {
+                                        for (ProductDetails detail : list) {
+                                            try {
+                                                if (detail != null) {
+                                                    JSONObject json =
+                                                            V8ProductDetailCompat
+                                                                    .toCompatDetailJson(
+                                                                            detail, isSubs);
+                                                    if (json != null && json.length() > 0) {
+                                                        checkDataAndAddNeedParam(
+                                                                null, json, detail.getProductId());
+                                                        mProductDetails.put(
+                                                                detail.getProductId(), json);
+                                                    }
+                                                }
+                                            } catch (Throwable ignore) {
+                                            }
+                                        }
                                     }
+                                    tryUploadHistoryLog();
                                 }
-                            } catch (Throwable ignore) {
                             }
                         }
-                    }
-                    tryUploadHistoryLog();
-                }
-            }
-        });
+                    });
+        }
     }
 
-    private List<String> getUnresolvedProductIds(List<String> requestedIds, Set<String> resolvedIds) {
+    private List<String> getUnresolvedProductIds(
+            List<String> requestedIds, Set<String> resolvedIds) {
         List<String> unresolvedIds = new ArrayList<>();
         if (requestedIds == null || requestedIds.isEmpty()) {
             return unresolvedIds;
         }
         for (String requestedId : requestedIds) {
-            if (!TextUtils.isEmpty(requestedId) && (resolvedIds == null || !resolvedIds.contains(requestedId))) {
+            if (!TextUtils.isEmpty(requestedId)
+                    && (resolvedIds == null || !resolvedIds.contains(requestedId))) {
                 unresolvedIds.add(requestedId);
             }
         }
@@ -547,40 +704,61 @@ class V8BillingProxy implements IBillingProxy {
     }
 
     private boolean isStartSuccess() {
-        return !mIsInitLoading.get() && mInitSuccess.get() && mBillingClient != null && mBillingClient.isReady();
+        return !mIsInitLoading.get()
+                && mInitSuccess.get()
+                && mBillingClient != null
+                && mBillingClient.isReady();
     }
 
     private void tryCreateAndStartBillingClient() {
-        if (isStartSuccess()) {
-            return;
-        }
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
 
-        mIsInitLoading.set(true);
-        try {
-            mBillingClient = BillingClient.newBuilder(TikTokBusinessSdk.getApplicationContext())
-                    .setListener(mUpdateListener)
-                    .enablePendingPurchases(PendingPurchasesParams.newBuilder()
-                            .enableOneTimeProducts()
-                            .enablePrepaidPlans()
-                            .build())
-                    .build();
-            mBillingClient.startConnection(new BillingClientStateListener() {
-                @Override
-                public void onBillingServiceDisconnected() {
-                    mIsInitLoading.set(false);
-                    mInitSuccess.set(false);
-                }
+            if (isStartSuccess()) {
+                return;
+            }
 
-                @Override
-                public void onBillingSetupFinished(@NonNull BillingResult billingResult) {
-                    mIsInitLoading.set(false);
-                    mInitSuccess.set(billingResult.getResponseCode() == BillingClient.BillingResponseCode.OK);
-                }
-            });
-        } catch (Throwable e) {
-            ttLogger.error(e, "billing client init error");
-            mIsInitLoading.set(false);
-            mInitSuccess.set(false);
+            mIsInitLoading.set(true);
+            try {
+                mBillingClient =
+                        BillingClient.newBuilder(TikTokBusinessSdk.getApplicationContext())
+                                .setListener(mUpdateListener)
+                                .enablePendingPurchases(
+                                        PendingPurchasesParams.newBuilder()
+                                                .enableOneTimeProducts()
+                                                .enablePrepaidPlans()
+                                                .build())
+                                .build();
+                mBillingClient.startConnection(
+                        new BillingClientStateListener() {
+                            @Override
+                            public void onBillingServiceDisconnected() {
+                                synchronized (TTTrackingConsent.LOCK) {
+                                    if (!isConsentCurrent()) return;
+
+                                    mIsInitLoading.set(false);
+                                    mInitSuccess.set(false);
+                                }
+                            }
+
+                            @Override
+                            public void onBillingSetupFinished(
+                                    @NonNull BillingResult billingResult) {
+                                synchronized (TTTrackingConsent.LOCK) {
+                                    if (!isConsentCurrent()) return;
+
+                                    mIsInitLoading.set(false);
+                                    mInitSuccess.set(
+                                            billingResult.getResponseCode()
+                                                    == BillingClient.BillingResponseCode.OK);
+                                }
+                            }
+                        });
+            } catch (Throwable e) {
+                ttLogger.error(e, "billing client init error");
+                mIsInitLoading.set(false);
+                mInitSuccess.set(false);
+            }
         }
     }
 }

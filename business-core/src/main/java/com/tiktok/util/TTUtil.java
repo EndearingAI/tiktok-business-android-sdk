@@ -17,7 +17,6 @@ import android.text.TextUtils;
 
 import androidx.annotation.Nullable;
 
-import com.tiktok.TikTokBusinessSdk;
 import com.tiktok.appevents.TTCrashHandler;
 import com.tiktok.appevents.edp.Sensig;
 
@@ -27,33 +26,38 @@ import java.util.Arrays;
 import java.util.UUID;
 
 public class TTUtil {
-    private static final TTLogger logger = new TTLogger("TTUtil", TikTokBusinessSdk.getLogLevel());
 
     /**
-     * All internal operations should be pushed to the internal {@link com.tiktok.appevents.TTAppEventLogger#eventLoop}
-     * and run in a non-main thread
+     * All internal operations should be pushed to the internal {@link
+     * com.tiktok.appevents.TTAppEventLogger#eventLoop} and run in a non-main thread
      *
      * @param tag tag name
      */
     public static void checkThread(String tag) {
         if (Looper.getMainLooper() == Looper.myLooper()) {
-            TTCrashHandler.handleCrash(tag, new IllegalStateException("Current method should be called in a non-main thread"), TTSDK_EXCEPTION_SDK_CATCH);
+            TTCrashHandler.handleCrash(
+                    tag,
+                    new IllegalStateException(
+                            "Current method should be called in a non-main thread"),
+                    TTSDK_EXCEPTION_SDK_CATCH);
         }
     }
 
     public static String getOrGenAnoId(Context context, boolean forceGenerate) {
-        try {
-            TTKeyValueStore store = new TTKeyValueStore(context);
-            String anoId = store.get(TTSDK_APP_ANONYMOUS_ID);
-            if (TextUtils.isEmpty(anoId) || forceGenerate) {
-                anoId = UUID.randomUUID().toString();
-                store.set(TTSDK_APP_ANONYMOUS_ID, anoId);
-                logger.info("AnonymousId reset to " + anoId);
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isGranted()) return null;
+            try {
+                TTKeyValueStore store = new TTKeyValueStore(context);
+                String anoId = store.get(TTSDK_APP_ANONYMOUS_ID);
+                if (TextUtils.isEmpty(anoId) || forceGenerate) {
+                    anoId = UUID.randomUUID().toString();
+                    store.set(TTSDK_APP_ANONYMOUS_ID, anoId);
+                }
+                return anoId;
+            } catch (Throwable ignore) {
             }
-            return anoId;
-        } catch (Throwable ignore) {
+            return "";
         }
-        return "";
     }
 
     public static Sensig getSensigInfo(Context context) {
@@ -90,7 +94,8 @@ public class TTUtil {
         return json;
     }
 
-    public static JSONObject getMonitorException(@Nullable Throwable ex, @Nullable Long ts, int type) {
+    public static JSONObject getMonitorException(
+            @Nullable Throwable ex, @Nullable Long ts, int type) {
         JSONObject monitor = JSON.build();
         try {
             JSON.putObject(monitor, "type", "exception");
@@ -112,8 +117,10 @@ public class TTUtil {
                     rootCause = rootCause.getCause();
                 JSON.putObject(meta, "ex_class", rootCause.getStackTrace()[0].getClassName());
                 JSON.putObject(meta, "ex_method", rootCause.getStackTrace()[0].getMethodName());
-                String argMsg = rootCause.getStackTrace()[0].getFileName() +
-                        " " + rootCause.getStackTrace()[0].getLineNumber();
+                String argMsg =
+                        rootCause.getStackTrace()[0].getFileName()
+                                + " "
+                                + rootCause.getStackTrace()[0].getLineNumber();
                 JSON.putObject(meta, "ex_args", argMsg);
                 JSON.putObject(meta, "ex_msg", rootCause.getMessage());
                 JSON.putInt(meta, "ex_type", type);

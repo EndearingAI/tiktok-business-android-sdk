@@ -10,4 +10,5 @@ public interface IBillingProxy {
 
     void queryPurchaseHistory();
 
+    default void close() {}
 }

@@ -4,6 +4,7 @@ import android.content.Context;
 import android.content.SharedPreferences;
 
 import com.tiktok.TikTokBusinessSdk;
+import com.tiktok.util.TTTrackingConsent;
 
 public final class BillCache {
     private static final long DEF_LAST = 1735660800000L;
@@ -13,7 +14,6 @@ public final class BillCache {
 
     private static volatile BillCache sInstance;
     private SharedPreferences mSP = null;
-
 
     public static BillCache getInstance() {
         if (sInstance == null) {
@@ -26,49 +26,61 @@ public final class BillCache {
         return sInstance;
     }
 
-    private BillCache() {
-
-    }
+    private BillCache() {}
 
     public long getINAPPLast() {
-        final SharedPreferences sp = getSP();
-        if (sp != null) {
-            return sp.getLong(K_INAPP_LAST, DEF_LAST);
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isGranted()) return DEF_LAST;
+
+            final SharedPreferences sp = getSP();
+            if (sp != null) {
+                return sp.getLong(K_INAPP_LAST, DEF_LAST);
+            }
+            return DEF_LAST;
         }
-        return DEF_LAST;
     }
 
     public long getSUBSLast() {
-        final SharedPreferences sp = getSP();
-        if (sp != null) {
-            return sp.getLong(K_SUBS_LAST, DEF_LAST);
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isGranted()) return DEF_LAST;
+
+            final SharedPreferences sp = getSP();
+            if (sp != null) {
+                return sp.getLong(K_SUBS_LAST, DEF_LAST);
+            }
+            return DEF_LAST;
         }
-        return DEF_LAST;
     }
 
     public void saveINAPPLast(long last) {
-        try {
-            if (last > 0) {
-                final SharedPreferences sp = getSP();
-                if (sp != null) {
-                    sp.edit().putLong(K_INAPP_LAST, last)
-                            .apply();
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isGranted()) return;
+
+            try {
+                if (last > 0) {
+                    final SharedPreferences sp = getSP();
+                    if (sp != null) {
+                        sp.edit().putLong(K_INAPP_LAST, last).apply();
+                    }
                 }
+            } catch (Throwable ignore) {
             }
-        } catch (Throwable ignore) {
         }
     }
 
     public void saveSUBSLast(long last) {
-        try {
-            if (last > 0) {
-                final SharedPreferences sp = getSP();
-                if (sp != null) {
-                    sp.edit().putLong(K_SUBS_LAST, last)
-                            .apply();
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isGranted()) return;
+
+            try {
+                if (last > 0) {
+                    final SharedPreferences sp = getSP();
+                    if (sp != null) {
+                        sp.edit().putLong(K_SUBS_LAST, last).apply();
+                    }
                 }
+            } catch (Throwable ignore) {
             }
-        } catch (Throwable ignore) {
         }
     }
 

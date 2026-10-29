@@ -7,6 +7,7 @@
 package com.tiktok.appevents;
 
 import com.tiktok.TikTokBusinessSdk;
+import com.tiktok.util.TTTrackingConsent;
 import com.tiktok.util.TTUtil;
 
 import java.util.List;
@@ -17,31 +18,36 @@ class TTEdpAppEventsQueue {
     private static final String TAG = "TTEdpAppEventsQueue";
     private static List<TTAppEvent> memory = new CopyOnWriteArrayList<>();
 
-    private TTEdpAppEventsQueue() {
-    }
+    private TTEdpAppEventsQueue() {}
 
     private static void notifyChange() {
+        if (!TTTrackingConsent.isGranted()) return;
         if (TikTokBusinessSdk.memoryListener != null) {
             TikTokBusinessSdk.memoryListener.onMemoryChange(memory.size());
         }
 
         if (TikTokBusinessSdk.nextTimeFlushListener != null) {
             int left = TTAppEventLogger.THRESHOLD - size();
-            TikTokBusinessSdk.nextTimeFlushListener.thresholdLeft(TTAppEventLogger.THRESHOLD, Math.max(left, 0));
+            TikTokBusinessSdk.nextTimeFlushListener.thresholdLeft(
+                    TTAppEventLogger.THRESHOLD, Math.max(left, 0));
         }
     }
 
-    public static synchronized void addEvent(TTAppEvent event) {
-        TTUtil.checkThread(TAG);
-        memory.add(event);
-        notifyChange();
+    public static void addEvent(TTAppEvent event) {
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isGranted()) return;
+
+            TTUtil.checkThread(TAG);
+            memory.add(event);
+            notifyChange();
+        }
     }
 
-    public static synchronized int size() {
+    public static int size() {
         return memory.size();
     }
 
-    public static synchronized void clearAll() {
+    public static void clearAll() {
         try {
             TTUtil.checkThread(TAG);
             memory = new CopyOnWriteArrayList<>();
@@ -50,11 +56,14 @@ class TTEdpAppEventsQueue {
         }
     }
 
-    public static synchronized List<TTAppEvent> exportAllEvents() {
-        List<TTAppEvent> appEvents = memory;
-        memory = new CopyOnWriteArrayList<>();
-        notifyChange();
-        return appEvents;
-    }
+    public static List<TTAppEvent> exportAllEvents() {
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isGranted()) return new java.util.ArrayList<>();
 
+            List<TTAppEvent> appEvents = memory;
+            memory = new CopyOnWriteArrayList<>();
+            notifyChange();
+            return appEvents;
+        }
+    }
 }

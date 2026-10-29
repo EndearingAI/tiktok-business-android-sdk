@@ -1,6 +1,12 @@
 > [!IMPORTANT]
 > Use of the TikTok App Events SDK is governed by the [TikTok For Business Commercial Terms of Service](https://ads.tiktok.com/i18n/official/policy/commercial-terms-of-service). By using the TikTok App Events SDK, you also agree to the [TikTok Business Products (Data) Terms](https://ads.tiktok.com/i18n/official/policy/business-products-terms) and that you will not share sensitive data with TikTok.
 
+# Endearing maintained consent fork
+
+This fork defaults tracking off and adds native withdrawal, identifier erasure,
+and durable conversion delivery. Read [CONSENT_FORK.md](CONSENT_FORK.md) before
+integrating it; the upstream initialization/auto-start privacy behavior has changed.
+
 # About TikTok App Events SDK
 The TikTok App Events SDK enables you to transmit app events, such as Installs, Add to Cart, or Purchases, directly from your mobile app to TikTok. After events are shared, you can view event data in TikTok Events Manager, create audiences for targeting, and optimize your campaigns based on the app events.
 
@@ -30,4 +36,4 @@ For developer details including integration instructions, see [TikTok App Events
 
 ## Documentation
 - Developer documentation is available in the [TikTok for Business Developers](https://business-api.tiktok.com/portal/docs?id=1739584951798785) portal.
-- Marketing user documentation is available in the [TikTok for Business Help Center](https://ads.tiktok.com/help/article/how-to-integrate-tiktok-app-events-sdk). 
+- Marketing user documentation is available in the [TikTok for Business Help Center](https://ads.tiktok.com/help/article/how-to-integrate-tiktok-app-events-sdk).

@@ -11,7 +11,7 @@ buildscript {
         google()
     }
     dependencies {
-        classpath 'com.android.tools.build:gradle:4.2.2'
+        classpath 'com.android.tools.build:gradle:8.10.1'
     }
 }
 
@@ -30,7 +30,7 @@ ext {
 
     minSdkVersion = 21
     targetSdkVersion = 31
-    compileSdkVersion = 30
+    compileSdkVersion = 35
 }
 
 task clean(type: Delete) {

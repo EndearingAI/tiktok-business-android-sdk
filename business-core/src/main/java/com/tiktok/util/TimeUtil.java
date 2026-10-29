@@ -17,13 +17,13 @@ import java.util.TimeZone;
 
 public class TimeUtil {
     @SuppressLint("ConstantLocale")
-    private static final DateFormat sFormate = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.getDefault());
-    private final static SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
+    private static final DateFormat sFormate =
+            new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.getDefault());
 
-    /**
-     * return ISO8601 time format
-     */
-    public static String getISO8601Timestamp(Date date) {
+    private static final SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
+
+    /** return ISO8601 time format */
+    public static synchronized String getISO8601Timestamp(Date date) {
         try {
             TimeZone tz = TimeZone.getTimeZone("UTC");
             sFormate.setTimeZone(tz);
@@ -40,7 +40,6 @@ public class TimeUtil {
         }
         return "";
     }
-
 
     public static String dateStr(int dayDifference) {
         // now

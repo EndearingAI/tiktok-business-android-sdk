@@ -13,6 +13,7 @@ import com.tiktok.iap.billing.model.TTPayData;
 import com.tiktok.util.JSON;
 import com.tiktok.util.TTLogger;
 import com.tiktok.util.TTReflect;
+import com.tiktok.util.TTTrackingConsent;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -30,25 +31,66 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 class V5_V7BillingProxy implements IBillingProxy {
-    private static final String CLASS_BILLING_CLIENT = "com.android.billingclient.api.BillingClient";
-    private static final String CLASS_BILLING_CLIENT_BUILDER = "com.android.billingclient.api.BillingClient$Builder";
-    private static final String CLASS_BILLING_RESPONSE_CODE = "com.android.billingclient.api.BillingClient$BillingResponseCode";
-    private static final String CLASS_SKU_TYPE = "com.android.billingclient.api.BillingClient$SkuType";
-    private static final String CLASS_BILLING_CLIENT_STATE_LISTENER = "com.android.billingclient.api.BillingClientStateListener";
-    private static final String CLASS_PURCHASES_UPDATED_LISTENER = "com.android.billingclient.api.PurchasesUpdatedListener";
-    private static final String CLASS_SKU_DETAILS_PARAMS = "com.android.billingclient.api.SkuDetailsParams";
-    private static final String CLASS_SKU_DETAILS_PARAMS_BUILDER = "com.android.billingclient.api.SkuDetailsParams$Builder";
-    private static final String CLASS_SKU_DETAILS_RESPONSE_LISTENER = "com.android.billingclient.api.SkuDetailsResponseListener";
-    private static final String CLASS_QUERY_PURCHASE_HISTORY_PARAMS = "com.android.billingclient.api.QueryPurchaseHistoryParams";
-    private static final String CLASS_QUERY_PURCHASE_HISTORY_PARAMS_BUILDER = "com.android.billingclient.api.QueryPurchaseHistoryParams$Builder";
-    private static final String CLASS_PURCHASE_HISTORY_RESPONSE_LISTENER = "com.android.billingclient.api.PurchaseHistoryResponseListener";
-    private static final String CLASS_QUERY_PRODUCT_DETAILS_PARAMS = "com.android.billingclient.api.QueryProductDetailsParams";
-    private static final String CLASS_QUERY_PRODUCT_DETAILS_PARAMS_BUILDER = "com.android.billingclient.api.QueryProductDetailsParams$Builder";
-    private static final String CLASS_QUERY_PRODUCT_DETAILS_PRODUCT = "com.android.billingclient.api.QueryProductDetailsParams$Product";
-    private static final String CLASS_QUERY_PRODUCT_DETAILS_PRODUCT_BUILDER = "com.android.billingclient.api.QueryProductDetailsParams$Product$Builder";
-    private static final String CLASS_PRODUCT_DETAILS_RESPONSE_LISTENER = "com.android.billingclient.api.ProductDetailsResponseListener";
+    private static final String CLASS_BILLING_CLIENT =
+            "com.android.billingclient.api.BillingClient";
+    private static final String CLASS_BILLING_CLIENT_BUILDER =
+            "com.android.billingclient.api.BillingClient$Builder";
+    private static final String CLASS_BILLING_RESPONSE_CODE =
+            "com.android.billingclient.api.BillingClient$BillingResponseCode";
+    private static final String CLASS_SKU_TYPE =
+            "com.android.billingclient.api.BillingClient$SkuType";
+    private static final String CLASS_BILLING_CLIENT_STATE_LISTENER =
+            "com.android.billingclient.api.BillingClientStateListener";
+    private static final String CLASS_PURCHASES_UPDATED_LISTENER =
+            "com.android.billingclient.api.PurchasesUpdatedListener";
+    private static final String CLASS_SKU_DETAILS_PARAMS =
+            "com.android.billingclient.api.SkuDetailsParams";
+    private static final String CLASS_SKU_DETAILS_PARAMS_BUILDER =
+            "com.android.billingclient.api.SkuDetailsParams$Builder";
+    private static final String CLASS_SKU_DETAILS_RESPONSE_LISTENER =
+            "com.android.billingclient.api.SkuDetailsResponseListener";
+    private static final String CLASS_QUERY_PURCHASE_HISTORY_PARAMS =
+            "com.android.billingclient.api.QueryPurchaseHistoryParams";
+    private static final String CLASS_QUERY_PURCHASE_HISTORY_PARAMS_BUILDER =
+            "com.android.billingclient.api.QueryPurchaseHistoryParams$Builder";
+    private static final String CLASS_PURCHASE_HISTORY_RESPONSE_LISTENER =
+            "com.android.billingclient.api.PurchaseHistoryResponseListener";
+    private static final String CLASS_QUERY_PRODUCT_DETAILS_PARAMS =
+            "com.android.billingclient.api.QueryProductDetailsParams";
+    private static final String CLASS_QUERY_PRODUCT_DETAILS_PARAMS_BUILDER =
+            "com.android.billingclient.api.QueryProductDetailsParams$Builder";
+    private static final String CLASS_QUERY_PRODUCT_DETAILS_PRODUCT =
+            "com.android.billingclient.api.QueryProductDetailsParams$Product";
+    private static final String CLASS_QUERY_PRODUCT_DETAILS_PRODUCT_BUILDER =
+            "com.android.billingclient.api.QueryProductDetailsParams$Product$Builder";
+    private static final String CLASS_PRODUCT_DETAILS_RESPONSE_LISTENER =
+            "com.android.billingclient.api.ProductDetailsResponseListener";
 
-    private static final TTLogger ttLogger = new TTLogger("BillingProxyV5", TikTokBusinessSdk.getLogLevel());
+    private static final TTLogger ttLogger =
+            new TTLogger("BillingProxyV5", TikTokBusinessSdk.getLogLevel());
+
+    private final long consentGeneration = TTTrackingConsent.capture();
+    private volatile boolean closed;
+
+    private boolean isConsentCurrent() {
+        return !closed
+                && TTTrackingConsent.isCurrent(consentGeneration)
+                && TikTokBusinessSdk.enableAutoIapTrack();
+    }
+
+    @Override
+    public void close() {
+        closed = true;
+        mIsInitLoading.set(false);
+        mInitSuccess.set(false);
+        if (mBillingClient != null) {
+            callMethod(mBillingClient, "endConnection", new Class<?>[0]);
+            mBillingClient = null;
+        }
+        mHistorySubs.clear();
+        mHistoryInApp.clear();
+        mProductDetails.clear();
+    }
 
     private final AtomicBoolean mIsInitLoading = new AtomicBoolean(false);
     private final AtomicBoolean mInitSuccess = new AtomicBoolean(false);
@@ -67,7 +109,11 @@ class V5_V7BillingProxy implements IBillingProxy {
 
     @Override
     public void init() {
-        tryCreateAndStartBillingClient();
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
+
+            tryCreateAndStartBillingClient();
+        }
     }
 
     private boolean isAutoIAPTrackEnable() {
@@ -75,305 +121,398 @@ class V5_V7BillingProxy implements IBillingProxy {
     }
 
     private void sendPurchase(Object billingResult, List<?> list) {
-        if (billingResult == null || list == null || !isOkResponse(billingResult)) {
-            return;
-        }
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
 
-        if (isAutoIAPTrackEnable()) {
-            for (Object purchase : list) {
-                if (purchase == null) {
-                    continue;
+            if (billingResult == null || list == null || !isOkResponse(billingResult)) {
+                return;
+            }
+
+            if (isAutoIAPTrackEnable()) {
+                for (Object purchase : list) {
+                    if (purchase == null) {
+                        continue;
+                    }
+                    List<String> skus = getPurchaseSkus(purchase);
+                    if (skus == null || skus.isEmpty()) {
+                        continue;
+                    }
+                    querySkuAndTrack(skus, purchase, true);
                 }
-                List<String> skus = getPurchaseSkus(purchase);
-                if (skus == null || skus.isEmpty()) {
-                    continue;
-                }
-                querySkuAndTrack(skus, purchase, true);
             }
         }
     }
 
     private void querySkuAndTrack(List<String> skus, Object purchase, boolean isInAppPurchase) {
-        try {
-            Object params = buildSkuDetailsParams(skus, isInAppPurchase);
-            if (params == null) {
-                sendNoSkuIapTrack(skus, purchase);
-                return;
-            }
-            Object listener = createSkuDetailsResponseListener(new InvocationHandler() {
-                @Override
-                public Object invoke(Object proxy, Method method, Object[] args) {
-                    try {
-                        if (method == null || !"onSkuDetailsResponse".equals(method.getName()) || args == null || args.length < 2) {
-                            return null;
-                        }
-                        Object billingResult = args[0];
-                        List<?> skuDetailsList = castList(args[1]);
-                        if (billingResult != null && isOkResponse(billingResult) && skuDetailsList != null) {
-                            if (skuDetailsList.size() > 0) {
-                                List<TTPurchaseInfo> purchaseInfos = new ArrayList<>();
-                                try {
-                                    for (Object skuDetails : skuDetailsList) {
-                                        try {
-                                            TTPurchaseInfo purchaseInfo = new TTPurchaseInfo(
-                                                    JSON.build(getOriginalJson(purchase)),
-                                                    JSON.build(getOriginalJson(skuDetails)));
-                                            purchaseInfo.setAutoTrack(true);
-                                            purchaseInfo.setSubs(!isInAppPurchase);
-                                            purchaseInfos.add(purchaseInfo);
-                                        } catch (Throwable ignore) {
-                                        }
-                                    }
-                                    TikTokBusinessSdk.trackGooglePlayPurchase(purchaseInfos);
-                                } catch (Throwable e) {
-                                    ttLogger.error(e, "query Sku And Track google play purchase error");
-                                }
-                            } else if (isInAppPurchase) {
-                                querySkuAndTrack(skus, purchase, false);
-                            } else {
-                                sendNoSkuIapTrack(skus, purchase);
-                            }
-                        } else {
-                            sendNoSkuIapTrack(skus, purchase);
-                        }
-                    } catch (Throwable e) {
-                        ttLogger.error(e, "query Sku And Track error");
-                    }
-                    return null;
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
+
+            try {
+                Object params = buildSkuDetailsParams(skus, isInAppPurchase);
+                if (params == null) {
+                    sendNoSkuIapTrack(skus, purchase);
+                    return;
                 }
-            });
-            invokeBillingClientMethod("querySkuDetailsAsync",
-                    new Class<?>[]{getClassByName(CLASS_SKU_DETAILS_PARAMS), getClassByName(CLASS_SKU_DETAILS_RESPONSE_LISTENER)},
-                    params, listener);
-        } catch (Throwable e) {
-            ttLogger.error(e, "query Sku And Track error2");
+                Object listener =
+                        createSkuDetailsResponseListener(
+                                new InvocationHandler() {
+                                    @Override
+                                    public Object invoke(
+                                            Object proxy, Method method, Object[] args) {
+                                        try {
+                                            if (method == null
+                                                    || !"onSkuDetailsResponse"
+                                                            .equals(method.getName())
+                                                    || args == null
+                                                    || args.length < 2) {
+                                                return null;
+                                            }
+                                            Object billingResult = args[0];
+                                            List<?> skuDetailsList = castList(args[1]);
+                                            if (billingResult != null
+                                                    && isOkResponse(billingResult)
+                                                    && skuDetailsList != null) {
+                                                if (skuDetailsList.size() > 0) {
+                                                    List<TTPurchaseInfo> purchaseInfos =
+                                                            new ArrayList<>();
+                                                    try {
+                                                        for (Object skuDetails : skuDetailsList) {
+                                                            try {
+                                                                TTPurchaseInfo purchaseInfo =
+                                                                        new TTPurchaseInfo(
+                                                                                JSON.build(
+                                                                                        getOriginalJson(
+                                                                                                purchase)),
+                                                                                JSON.build(
+                                                                                        getOriginalJson(
+                                                                                                skuDetails)));
+                                                                purchaseInfo.setAutoTrack(true);
+                                                                purchaseInfo.setSubs(
+                                                                        !isInAppPurchase);
+                                                                purchaseInfos.add(purchaseInfo);
+                                                            } catch (Throwable ignore) {
+                                                            }
+                                                        }
+                                                        TikTokBusinessSdk.trackGooglePlayPurchase(
+                                                                purchaseInfos);
+                                                    } catch (Throwable e) {
+                                                        ttLogger.error(
+                                                                e,
+                                                                "query Sku And Track google play"
+                                                                        + " purchase error");
+                                                    }
+                                                } else if (isInAppPurchase) {
+                                                    querySkuAndTrack(skus, purchase, false);
+                                                } else {
+                                                    sendNoSkuIapTrack(skus, purchase);
+                                                }
+                                            } else {
+                                                sendNoSkuIapTrack(skus, purchase);
+                                            }
+                                        } catch (Throwable e) {
+                                            ttLogger.error(e, "query Sku And Track error");
+                                        }
+                                        return null;
+                                    }
+                                });
+                invokeBillingClientMethod(
+                        "querySkuDetailsAsync",
+                        new Class<?>[] {
+                            getClassByName(CLASS_SKU_DETAILS_PARAMS),
+                            getClassByName(CLASS_SKU_DETAILS_RESPONSE_LISTENER)
+                        },
+                        params,
+                        listener);
+            } catch (Throwable e) {
+                ttLogger.error(e, "query Sku And Track error2");
+            }
         }
     }
 
-    private static void sendNoSkuIapTrack(List<String> skus, Object purchase) {
-        try {
-            JSONArray contents = JSON.buildArr();
-            for (String sku : skus) {
-                if (sku == null || sku.isEmpty()) {
-                    continue;
-                }
-                JSONObject item = JSON.build();
-                JSON.putInt(item, "quantity", getPurchaseQuantity(purchase));
-                JSON.putObject(item, "content_id", sku);
+    private void sendNoSkuIapTrack(List<String> skus, Object purchase) {
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
 
-                JSON.putArr(contents, item);
+            try {
+                JSONArray contents = JSON.buildArr();
+                for (String sku : skus) {
+                    if (sku == null || sku.isEmpty()) {
+                        continue;
+                    }
+                    JSONObject item = JSON.build();
+                    JSON.putInt(item, "quantity", getPurchaseQuantity(purchase));
+                    JSON.putObject(item, "content_id", sku);
+
+                    JSON.putArr(contents, item);
+                }
+                JSONObject content = JSON.build();
+                JSON.putObject(content, "contents", contents);
+                TikTokBusinessSdk.trackEvent("Purchase", content);
+            } catch (Throwable e) {
+                ttLogger.error(e, "Track Purchase error");
             }
-            JSONObject content = JSON.build();
-            JSON.putObject(content, "contents", contents);
-            TikTokBusinessSdk.trackEvent("Purchase", content);
-        } catch (Throwable e) {
-            ttLogger.error(e, "Track Purchase error");
         }
     }
 
     private void sendPageShow(Object billingResult, List<?> list) {
-        if (billingResult == null || list == null) {
-            return;
-        }
-        try {
-            if (EDPConfig.enable_pay_show_track) {
-                JSONArray arrPurchase = JSON.buildArr();
-                for (Object purchase : list) {
-                    JSONObject json = JSON.build(getOriginalJson(purchase));
-                    JSON.putArr(arrPurchase, json);
-                }
-                TTEDPEventTrack.trackPayShow(getBillingResponseCode(billingResult), arrPurchase);
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
+
+            if (billingResult == null || list == null) {
+                return;
             }
-        } catch (Throwable ignore) {
+            try {
+                if (EDPConfig.enable_pay_show_track) {
+                    JSONArray arrPurchase = JSON.buildArr();
+                    for (Object purchase : list) {
+                        JSONObject json = JSON.build(getOriginalJson(purchase));
+                        JSON.putArr(arrPurchase, json);
+                    }
+                    TTEDPEventTrack.trackPayShow(
+                            getBillingResponseCode(billingResult), arrPurchase);
+                }
+            } catch (Throwable ignore) {
+            }
         }
     }
 
     @Override
     public void queryPurchaseHistory() {
-        if (!TTInAppPurchaseWrapper.autoTrackPaymentHistory) {
-            return;
-        }
-        if (!isStartSuccess()) {
-            tryCreateAndStartBillingClient();
-            return;
-        }
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
 
-        try {
-            doQueryPurchaseHistory();
-            TTInAppPurchaseWrapper.hasReportedHistoryInLife = true;
-        } catch (Throwable ignore) {
+            if (!TTInAppPurchaseWrapper.autoTrackPaymentHistory) {
+                return;
+            }
+            if (!isStartSuccess()) {
+                tryCreateAndStartBillingClient();
+                return;
+            }
+
+            try {
+                doQueryPurchaseHistory();
+                TTInAppPurchaseWrapper.hasReportedHistoryInLife = true;
+            } catch (Throwable ignore) {
+            }
         }
     }
 
     private void doQueryPurchaseHistory() {
-        try {
-            if (TTInAppPurchaseWrapper.autoTrackPaymentHistory && TTInAppPurchaseWrapper.canTrackINAPP()) {
-                Object paramsINAPP = buildQueryPurchaseHistoryParams(false);
-                Object listener = createPurchaseHistoryResponseListener(new InvocationHandler() {
-                    @Override
-                    public Object invoke(Object proxy, Method method, Object[] args) {
-                        if (method == null || !"onPurchaseHistoryResponse".equals(method.getName()) || args == null || args.length < 2) {
-                            return null;
-                        }
-                        if (TTInAppPurchaseWrapper.autoTrackPaymentHistory && TTInAppPurchaseWrapper.canTrackINAPP()) {
-                            queryProductDetailHistory(false, castList(args[1]));
-                        }
-                        return null;
-                    }
-                });
-                invokeBillingClientMethod("queryPurchaseHistoryAsync",
-                        new Class<?>[]{getClassByName(CLASS_QUERY_PURCHASE_HISTORY_PARAMS), getClassByName(CLASS_PURCHASE_HISTORY_RESPONSE_LISTENER)},
-                        paramsINAPP, listener);
-            }
-        } catch (Throwable e) {
-            ttLogger.error(e, "query h inapp error");
-        }
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
 
-
-        try {
-            if (TTInAppPurchaseWrapper.autoTrackPaymentHistory && TTInAppPurchaseWrapper.canTrackSUBS()) {
-                Object paramsSUBS = buildQueryPurchaseHistoryParams(true);
-                Object listener = createPurchaseHistoryResponseListener(new InvocationHandler() {
-                    @Override
-                    public Object invoke(Object proxy, Method method, Object[] args) {
-                        if (method == null || !"onPurchaseHistoryResponse".equals(method.getName()) || args == null || args.length < 2) {
-                            return null;
-                        }
-                        if (isOkResponse(args[0])) {
-                            if (TTInAppPurchaseWrapper.autoTrackPaymentHistory && TTInAppPurchaseWrapper.canTrackSUBS()) {
-                                queryProductDetailHistory(true, castList(args[1]));
-                            }
-                        }
-                        return null;
-                    }
-                });
-                invokeBillingClientMethod("queryPurchaseHistoryAsync",
-                        new Class<?>[]{getClassByName(CLASS_QUERY_PURCHASE_HISTORY_PARAMS), getClassByName(CLASS_PURCHASE_HISTORY_RESPONSE_LISTENER)},
-                        paramsSUBS, listener);
+            try {
+                if (TTInAppPurchaseWrapper.autoTrackPaymentHistory
+                        && TTInAppPurchaseWrapper.canTrackINAPP()) {
+                    Object paramsINAPP = buildQueryPurchaseHistoryParams(false);
+                    Object listener =
+                            createPurchaseHistoryResponseListener(
+                                    new InvocationHandler() {
+                                        @Override
+                                        public Object invoke(
+                                                Object proxy, Method method, Object[] args) {
+                                            if (method == null
+                                                    || !"onPurchaseHistoryResponse"
+                                                            .equals(method.getName())
+                                                    || args == null
+                                                    || args.length < 2) {
+                                                return null;
+                                            }
+                                            if (TTInAppPurchaseWrapper.autoTrackPaymentHistory
+                                                    && TTInAppPurchaseWrapper.canTrackINAPP()) {
+                                                queryProductDetailHistory(false, castList(args[1]));
+                                            }
+                                            return null;
+                                        }
+                                    });
+                    invokeBillingClientMethod(
+                            "queryPurchaseHistoryAsync",
+                            new Class<?>[] {
+                                getClassByName(CLASS_QUERY_PURCHASE_HISTORY_PARAMS),
+                                getClassByName(CLASS_PURCHASE_HISTORY_RESPONSE_LISTENER)
+                            },
+                            paramsINAPP,
+                            listener);
+                }
+            } catch (Throwable e) {
+                ttLogger.error(e, "query h inapp error");
             }
-        } catch (Throwable e) {
-            ttLogger.error(e, "query h subs error");
+
+            try {
+                if (TTInAppPurchaseWrapper.autoTrackPaymentHistory
+                        && TTInAppPurchaseWrapper.canTrackSUBS()) {
+                    Object paramsSUBS = buildQueryPurchaseHistoryParams(true);
+                    Object listener =
+                            createPurchaseHistoryResponseListener(
+                                    new InvocationHandler() {
+                                        @Override
+                                        public Object invoke(
+                                                Object proxy, Method method, Object[] args) {
+                                            if (method == null
+                                                    || !"onPurchaseHistoryResponse"
+                                                            .equals(method.getName())
+                                                    || args == null
+                                                    || args.length < 2) {
+                                                return null;
+                                            }
+                                            if (isOkResponse(args[0])) {
+                                                if (TTInAppPurchaseWrapper.autoTrackPaymentHistory
+                                                        && TTInAppPurchaseWrapper.canTrackSUBS()) {
+                                                    queryProductDetailHistory(
+                                                            true, castList(args[1]));
+                                                }
+                                            }
+                                            return null;
+                                        }
+                                    });
+                    invokeBillingClientMethod(
+                            "queryPurchaseHistoryAsync",
+                            new Class<?>[] {
+                                getClassByName(CLASS_QUERY_PURCHASE_HISTORY_PARAMS),
+                                getClassByName(CLASS_PURCHASE_HISTORY_RESPONSE_LISTENER)
+                            },
+                            paramsSUBS,
+                            listener);
+                }
+            } catch (Throwable e) {
+                ttLogger.error(e, "query h subs error");
+            }
         }
     }
 
     private void queryProductDetailHistory(boolean isSubs, List<?> list) {
-        try {
-            if (list == null || list.isEmpty()) {
-                return;
-            }
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
 
-            final List<String> idList = new ArrayList<>();
-            for (Object history : list) {
-                try {
-                    String data = getOriginalJson(history);
-                    JSONObject json = JSON.build(data);
-                    String pid = JSON.getString(json, "productId");
-                    if (!TextUtils.isEmpty(pid)) {
-                        checkDataAndAddNeedParam(json, null);
-                        TTPayData pay = new TTPayData();
-                        pay.productId = pid;
-                        pay.data = json;
-                        pay.purchaseTime = getPurchaseTime(history);
-                        if (isSubs) {
-                            mHistorySubs.put(pid, pay);
-                        } else {
-                            mHistoryInApp.put(pid, pay);
-                        }
-
-                        if (!mProductDetails.containsKey(pid)) {
-                            idList.add(pid);
-                        }
-                    }
-                } catch (Throwable ignore) {
+            try {
+                if (list == null || list.isEmpty()) {
+                    return;
                 }
-            }
 
-            if (idList.isEmpty()) {
-                //直接上报
-                tryUploadHistoryLog();
-            } else {
-                doQueryProductDetails(isSubs, idList);
+                final List<String> idList = new ArrayList<>();
+                for (Object history : list) {
+                    try {
+                        String data = getOriginalJson(history);
+                        JSONObject json = JSON.build(data);
+                        String pid = JSON.getString(json, "productId");
+                        if (!TextUtils.isEmpty(pid)) {
+                            checkDataAndAddNeedParam(json, null);
+                            TTPayData pay = new TTPayData();
+                            pay.productId = pid;
+                            pay.data = json;
+                            pay.purchaseTime = getPurchaseTime(history);
+                            if (isSubs) {
+                                mHistorySubs.put(pid, pay);
+                            } else {
+                                mHistoryInApp.put(pid, pay);
+                            }
+
+                            if (!mProductDetails.containsKey(pid)) {
+                                idList.add(pid);
+                            }
+                        }
+                    } catch (Throwable ignore) {
+                    }
+                }
+
+                if (idList.isEmpty()) {
+                    // 直接上报
+                    tryUploadHistoryLog();
+                } else {
+                    doQueryProductDetails(isSubs, idList);
+                }
+            } catch (Throwable e) {
+                ttLogger.error(e, "query h product details error");
             }
-        } catch (Throwable e) {
-            ttLogger.error(e, "query h product details error");
         }
     }
 
     private void tryUploadHistoryLog() {
-        if (!TTInAppPurchaseWrapper.autoTrackPaymentHistory) {
-            return;
-        }
-        if (mHistorySubs.isEmpty() && mHistoryInApp.isEmpty() && mProductDetails.isEmpty()) {
-            return;
-        }
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
 
-        try {
-            if (TTInAppPurchaseWrapper.canTrackSUBS()) {
-                Map<String, TTPayData> map = new HashMap<>(mHistorySubs);
-                map = filterPurchase(true, map);
-                sendHistoryLog(true, map);
+            if (!TTInAppPurchaseWrapper.autoTrackPaymentHistory) {
+                return;
             }
-        } catch (Throwable ignore) {
+            if (mHistorySubs.isEmpty() && mHistoryInApp.isEmpty() && mProductDetails.isEmpty()) {
+                return;
+            }
+
+            try {
+                if (TTInAppPurchaseWrapper.canTrackSUBS()) {
+                    Map<String, TTPayData> map = new HashMap<>(mHistorySubs);
+                    map = filterPurchase(true, map);
+                    sendHistoryLog(true, map);
+                }
+            } catch (Throwable ignore) {
+            }
+
+            if (TTInAppPurchaseWrapper.canTrackINAPP()) {
+                Map<String, TTPayData> map = new HashMap<>(mHistoryInApp);
+                map = filterPurchase(false, map);
+                sendHistoryLog(false, map);
+            }
+
+            mHistorySubs.clear();
+            mHistoryInApp.clear();
         }
-
-
-        if (TTInAppPurchaseWrapper.canTrackINAPP()) {
-            Map<String, TTPayData> map = new HashMap<>(mHistoryInApp);
-            map = filterPurchase(false, map);
-            sendHistoryLog(false, map);
-        }
-
-        mHistorySubs.clear();
-        mHistoryInApp.clear();
     }
 
     private void sendHistoryLog(boolean isSubs, Map<String, TTPayData> map) {
-        if (map == null || map.isEmpty()) {
-            return;
-        }
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
 
-        try {
-            long maxTime = 0;
-            List<TTPurchaseInfo> list = new ArrayList<>();
-            for (Map.Entry<String, TTPayData> entry : map.entrySet()) {
-                try {
-                    String pid = entry.getKey();
-                    TTPayData payData = entry.getValue();
-                    JSONObject sku = mProductDetails.get(pid);
-                    if (sku != null && sku.length() > 0) {
-                        checkDataAndAddNeedParam(payData.data, sku);
-                        TTPurchaseInfo info = new TTPurchaseInfo(payData.data, sku);
-                        info.setAutoTrack(true);
-                        info.setSubs(isSubs);
-                        list.add(info);
-
-                        maxTime = Math.max(maxTime, payData.purchaseTime);
-                    }
-                } catch (Throwable e) {
-                    ttLogger.error(e, "send history error");
-                }
+            if (map == null || map.isEmpty()) {
+                return;
             }
-            if (!list.isEmpty()) {
-                TikTokBusinessSdk.getAppEventLogger().trackPurchase(true, list);
 
-                if (maxTime > 0) {
-                    if (isSubs) {
-                        BillCache.getInstance().saveSUBSLast(maxTime);
-                    } else {
-                        BillCache.getInstance().saveINAPPLast(maxTime);
+            try {
+                long maxTime = 0;
+                List<TTPurchaseInfo> list = new ArrayList<>();
+                for (Map.Entry<String, TTPayData> entry : map.entrySet()) {
+                    try {
+                        String pid = entry.getKey();
+                        TTPayData payData = entry.getValue();
+                        JSONObject sku = mProductDetails.get(pid);
+                        if (sku != null && sku.length() > 0) {
+                            checkDataAndAddNeedParam(payData.data, sku);
+                            TTPurchaseInfo info = new TTPurchaseInfo(payData.data, sku);
+                            info.setAutoTrack(true);
+                            info.setSubs(isSubs);
+                            list.add(info);
+
+                            maxTime = Math.max(maxTime, payData.purchaseTime);
+                        }
+                    } catch (Throwable e) {
+                        ttLogger.error(e, "send history error");
                     }
                 }
+                if (!list.isEmpty()) {
+                    TikTokBusinessSdk.getAppEventLogger().trackPurchase(true, list);
+
+                    if (maxTime > 0) {
+                        if (isSubs) {
+                            BillCache.getInstance().saveSUBSLast(maxTime);
+                        } else {
+                            BillCache.getInstance().saveINAPPLast(maxTime);
+                        }
+                    }
+                }
+            } catch (Throwable ignore) {
             }
-        } catch (Throwable ignore) {
         }
     }
 
     private void checkDataAndAddNeedParam(JSONObject purchase, JSONObject sku) {
-        if (purchase != null && purchase.isNull("orderId")) {
-            JSON.putObject(purchase, "orderId", "");
-        }
-        if (sku != null && sku.isNull("price")) {
-            JSON.putObject(sku, "price", "");
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
+
+            if (purchase != null && purchase.isNull("orderId")) {
+                JSON.putObject(purchase, "orderId", "");
+            }
+            if (sku != null && sku.isNull("price")) {
+                JSON.putObject(sku, "price", "");
+            }
         }
     }
 
@@ -383,7 +522,10 @@ class V5_V7BillingProxy implements IBillingProxy {
         try {
             // filter purchase time
             if (map != null && !map.isEmpty()) {
-                long last = isSubs ? BillCache.getInstance().getSUBSLast() : BillCache.getInstance().getINAPPLast();
+                long last =
+                        isSubs
+                                ? BillCache.getInstance().getSUBSLast()
+                                : BillCache.getInstance().getINAPPLast();
                 for (Map.Entry<String, TTPayData> entry : map.entrySet()) {
                     try {
                         TTPayData pay = entry.getValue();
@@ -400,7 +542,7 @@ class V5_V7BillingProxy implements IBillingProxy {
         }
 
         try {
-            //filter total number
+            // filter total number
             List<TTPayData> allPays = new ArrayList<>();
             for (Map.Entry<String, TTPayData> entry : filterMap.entrySet()) {
                 if (entry != null && entry.getValue() != null) {
@@ -408,16 +550,23 @@ class V5_V7BillingProxy implements IBillingProxy {
                 }
             }
 
-            //按照时间倒序
-            Collections.sort(allPays, new Comparator<TTPayData>() {
-                @Override
-                public int compare(TTPayData o1, TTPayData o2) {
-                    return o1 == null || o2 == null ? 0 : Long.valueOf(o2.purchaseTime - o1.purchaseTime).intValue();
-                }
-            });
+            // 按照时间倒序
+            Collections.sort(
+                    allPays,
+                    new Comparator<TTPayData>() {
+                        @Override
+                        public int compare(TTPayData o1, TTPayData o2) {
+                            return o1 == null || o2 == null
+                                    ? 0
+                                    : Long.valueOf(o2.purchaseTime - o1.purchaseTime).intValue();
+                        }
+                    });
 
             filterMap = new HashMap<>();
-            int total = isSubs ? TTInAppPurchaseWrapper.autoTrackPaymentHistorySUBS : TTInAppPurchaseWrapper.autoTrackPaymentHistoryINAPP;
+            int total =
+                    isSubs
+                            ? TTInAppPurchaseWrapper.autoTrackPaymentHistorySUBS
+                            : TTInAppPurchaseWrapper.autoTrackPaymentHistoryINAPP;
             total = Math.min(allPays.size(), total);
             for (int i = 0; i < total; i++) {
                 try {
@@ -435,112 +584,159 @@ class V5_V7BillingProxy implements IBillingProxy {
     }
 
     private void doQueryProductDetails(boolean isSubs, List<String> idList) {
-        Object params = buildQueryProductDetailsParams(isSubs, idList);
-        if (params == null) {
-            return;
-        }
-        Object listener = createProductDetailsResponseListener(new InvocationHandler() {
-            @Override
-            public Object invoke(Object proxy, Method method, Object[] args) {
-                if (method == null || !"onProductDetailsResponse".equals(method.getName()) || args == null || args.length < 2) {
-                    return null;
-                }
-                if (isOkResponse(args[0])) {
-                    List<?> list = extractProductDetails(args[1]);
-                    if (list != null && !list.isEmpty()) {
-                        for (Object detail : list) {
-                            try {
-                                if (detail != null) {
-                                    String jsonStr = BillUtils.parserJsonFromProductDetail(String.valueOf(detail));
-                                    JSONObject json = JSON.build(jsonStr);
-                                    if (json != null && json.length() > 0) {
-                                        checkDataAndAddNeedParam(null, json);
-                                        mProductDetails.put(getProductId(detail), json);
-                                    }
-                                }
-                            } catch (Throwable ignore) {
-                            }
-                        }
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
 
-                        tryUploadHistoryLog();
-                    }
-                }
-                return null;
+            Object params = buildQueryProductDetailsParams(isSubs, idList);
+            if (params == null) {
+                return;
             }
-        });
-        invokeBillingClientMethod("queryProductDetailsAsync",
-                new Class<?>[]{getClassByName(CLASS_QUERY_PRODUCT_DETAILS_PARAMS), getClassByName(CLASS_PRODUCT_DETAILS_RESPONSE_LISTENER)},
-                params, listener);
+            Object listener =
+                    createProductDetailsResponseListener(
+                            new InvocationHandler() {
+                                @Override
+                                public Object invoke(Object proxy, Method method, Object[] args) {
+                                    if (method == null
+                                            || !"onProductDetailsResponse".equals(method.getName())
+                                            || args == null
+                                            || args.length < 2) {
+                                        return null;
+                                    }
+                                    if (isOkResponse(args[0])) {
+                                        List<?> list = extractProductDetails(args[1]);
+                                        if (list != null && !list.isEmpty()) {
+                                            for (Object detail : list) {
+                                                try {
+                                                    if (detail != null) {
+                                                        String jsonStr =
+                                                                BillUtils
+                                                                        .parserJsonFromProductDetail(
+                                                                                String.valueOf(
+                                                                                        detail));
+                                                        JSONObject json = JSON.build(jsonStr);
+                                                        if (json != null && json.length() > 0) {
+                                                            checkDataAndAddNeedParam(null, json);
+                                                            mProductDetails.put(
+                                                                    getProductId(detail), json);
+                                                        }
+                                                    }
+                                                } catch (Throwable ignore) {
+                                                }
+                                            }
+
+                                            tryUploadHistoryLog();
+                                        }
+                                    }
+                                    return null;
+                                }
+                            });
+            invokeBillingClientMethod(
+                    "queryProductDetailsAsync",
+                    new Class<?>[] {
+                        getClassByName(CLASS_QUERY_PRODUCT_DETAILS_PARAMS),
+                        getClassByName(CLASS_PRODUCT_DETAILS_RESPONSE_LISTENER)
+                    },
+                    params,
+                    listener);
+        }
     }
 
     private boolean isStartSuccess() {
-        return !mIsInitLoading.get() && mInitSuccess.get() && mBillingClient != null && invokeBooleanMethod(mBillingClient, "isReady");
+        return !mIsInitLoading.get()
+                && mInitSuccess.get()
+                && mBillingClient != null
+                && invokeBooleanMethod(mBillingClient, "isReady");
     }
 
     private void tryCreateAndStartBillingClient() {
-        if (isStartSuccess()) {
-            return;
-        }
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
 
-        mIsInitLoading.set(true);
-
-        try {
-            Object builder = callStaticMethod(CLASS_BILLING_CLIENT, "newBuilder", new Class<?>[]{Context.class}, TikTokBusinessSdk.getApplicationContext());
-            if (builder == null) {
-                throw new IllegalStateException("billing builder is null");
+            if (isStartSuccess()) {
+                return;
             }
-            callMethod(builder, "setListener", new Class<?>[]{getClassByName(CLASS_PURCHASES_UPDATED_LISTENER)}, mUpdateListener);
-            callMethod(builder, "enablePendingPurchases", new Class<?>[0]);
-            mBillingClient = callMethod(builder, "build", new Class<?>[0]);
-            Object stateListener = createBillingClientStateListener();
-            invokeBillingClientMethod("startConnection", new Class<?>[]{getClassByName(CLASS_BILLING_CLIENT_STATE_LISTENER)}, stateListener);
-        } catch (Throwable e) {
-            ttLogger.error(e, "billing client init error");
 
-            mIsInitLoading.set(false);
-            mInitSuccess.set(false);
+            mIsInitLoading.set(true);
+
+            try {
+                Object builder =
+                        callStaticMethod(
+                                CLASS_BILLING_CLIENT,
+                                "newBuilder",
+                                new Class<?>[] {Context.class},
+                                TikTokBusinessSdk.getApplicationContext());
+                if (builder == null) {
+                    throw new IllegalStateException("billing builder is null");
+                }
+                callMethod(
+                        builder,
+                        "setListener",
+                        new Class<?>[] {getClassByName(CLASS_PURCHASES_UPDATED_LISTENER)},
+                        mUpdateListener);
+                callMethod(builder, "enablePendingPurchases", new Class<?>[0]);
+                mBillingClient = callMethod(builder, "build", new Class<?>[0]);
+                Object stateListener = createBillingClientStateListener();
+                invokeBillingClientMethod(
+                        "startConnection",
+                        new Class<?>[] {getClassByName(CLASS_BILLING_CLIENT_STATE_LISTENER)},
+                        stateListener);
+            } catch (Throwable e) {
+                ttLogger.error(e, "billing client init error");
+
+                mIsInitLoading.set(false);
+                mInitSuccess.set(false);
+            }
         }
     }
 
     private Object createPurchasesUpdatedListener() {
-        return createListener(CLASS_PURCHASES_UPDATED_LISTENER, new InvocationHandler() {
-            @Override
-            public Object invoke(Object proxy, Method method, Object[] args) {
-                try {
-                    if (method == null || !"onPurchasesUpdated".equals(method.getName()) || args == null || args.length != 2) {
+        return createListener(
+                CLASS_PURCHASES_UPDATED_LISTENER,
+                new InvocationHandler() {
+                    @Override
+                    public Object invoke(Object proxy, Method method, Object[] args) {
+                        try {
+                            if (method == null
+                                    || !"onPurchasesUpdated".equals(method.getName())
+                                    || args == null
+                                    || args.length != 2) {
+                                return null;
+                            }
+                            Object billingResult = args[0];
+                            List<?> list = castList(args[1]);
+                            sendPageShow(billingResult, list);
+                            sendPurchase(billingResult, list);
+                            ttLogger.info("on billing result: " + String.valueOf(billingResult));
+                        } catch (Throwable ignore) {
+                        }
                         return null;
                     }
-                    Object billingResult = args[0];
-                    List<?> list = castList(args[1]);
-                    sendPageShow(billingResult, list);
-                    sendPurchase(billingResult, list);
-                    ttLogger.info("on billing result: " + String.valueOf(billingResult));
-                } catch (Throwable ignore) {
-                }
-                return null;
-            }
-        });
+                });
     }
 
     private Object createBillingClientStateListener() {
-        return createListener(CLASS_BILLING_CLIENT_STATE_LISTENER, new InvocationHandler() {
-            @Override
-            public Object invoke(Object proxy, Method method, Object[] args) {
-                if (method == null) {
-                    return null;
-                }
-                if ("onBillingServiceDisconnected".equals(method.getName())) {
-                    mIsInitLoading.set(false);
-                    mInitSuccess.set(false);
-                    return null;
-                }
-                if ("onBillingSetupFinished".equals(method.getName()) && args != null && args.length > 0) {
-                    mIsInitLoading.set(false);
-                    mInitSuccess.set(isOkResponse(args[0]));
-                }
-                return null;
-            }
-        });
+        return createListener(
+                CLASS_BILLING_CLIENT_STATE_LISTENER,
+                new InvocationHandler() {
+                    @Override
+                    public Object invoke(Object proxy, Method method, Object[] args) {
+                        if (method == null) {
+                            return null;
+                        }
+                        if ("onBillingServiceDisconnected".equals(method.getName())) {
+                            mIsInitLoading.set(false);
+                            mInitSuccess.set(false);
+                            return null;
+                        }
+                        if ("onBillingSetupFinished".equals(method.getName())
+                                && args != null
+                                && args.length > 0) {
+                            mIsInitLoading.set(false);
+                            mInitSuccess.set(isOkResponse(args[0]));
+                        }
+                        return null;
+                    }
+                });
     }
 
     private Object createSkuDetailsResponseListener(InvocationHandler handler) {
@@ -561,7 +757,15 @@ class V5_V7BillingProxy implements IBillingProxy {
             if (listenerClass == null) {
                 return null;
             }
-            return Proxy.newProxyInstance(listenerClass.getClassLoader(), new Class[]{listenerClass}, handler);
+            return Proxy.newProxyInstance(
+                    listenerClass.getClassLoader(),
+                    new Class[] {listenerClass},
+                    (proxy, method, args) -> {
+                        synchronized (TTTrackingConsent.LOCK) {
+                            if (!isConsentCurrent()) return null;
+                            return handler.invoke(proxy, method, args);
+                        }
+                    });
         } catch (Throwable ignore) {
         }
         return null;
@@ -581,17 +785,20 @@ class V5_V7BillingProxy implements IBillingProxy {
         if (builder == null) {
             return null;
         }
-        callMethod(builder, "setSkusList", new Class<?>[]{List.class}, skuList);
-        callMethod(builder, "setType", new Class<?>[]{String.class}, getSkuType(isInAppPurchase));
+        callMethod(builder, "setSkusList", new Class<?>[] {List.class}, skuList);
+        callMethod(builder, "setType", new Class<?>[] {String.class}, getSkuType(isInAppPurchase));
         return callMethod(builder, "build", new Class<?>[0]);
     }
 
     private Object buildQueryPurchaseHistoryParams(boolean isSubs) {
-        Object builder = callStaticMethod(CLASS_QUERY_PURCHASE_HISTORY_PARAMS, "newBuilder", new Class<?>[0]);
+        Object builder =
+                callStaticMethod(
+                        CLASS_QUERY_PURCHASE_HISTORY_PARAMS, "newBuilder", new Class<?>[0]);
         if (builder == null) {
             return null;
         }
-        callMethod(builder, "setProductType", new Class<?>[]{String.class}, getProductType(isSubs));
+        callMethod(
+                builder, "setProductType", new Class<?>[] {String.class}, getProductType(isSubs));
         return callMethod(builder, "build", new Class<?>[0]);
     }
 
@@ -604,12 +811,18 @@ class V5_V7BillingProxy implements IBillingProxy {
             if (TextUtils.isEmpty(pid)) {
                 continue;
             }
-            Object productBuilder = callStaticMethod(CLASS_QUERY_PRODUCT_DETAILS_PRODUCT, "newBuilder", new Class<?>[0]);
+            Object productBuilder =
+                    callStaticMethod(
+                            CLASS_QUERY_PRODUCT_DETAILS_PRODUCT, "newBuilder", new Class<?>[0]);
             if (productBuilder == null) {
                 continue;
             }
-            callMethod(productBuilder, "setProductType", new Class<?>[]{String.class}, getProductType(isSubs));
-            callMethod(productBuilder, "setProductId", new Class<?>[]{String.class}, pid);
+            callMethod(
+                    productBuilder,
+                    "setProductType",
+                    new Class<?>[] {String.class},
+                    getProductType(isSubs));
+            callMethod(productBuilder, "setProductId", new Class<?>[] {String.class}, pid);
             Object product = callMethod(productBuilder, "build", new Class<?>[0]);
             if (product != null) {
                 products.add(product);
@@ -618,24 +831,32 @@ class V5_V7BillingProxy implements IBillingProxy {
         if (products.isEmpty()) {
             return null;
         }
-        Object paramsBuilder = callStaticMethod(CLASS_QUERY_PRODUCT_DETAILS_PARAMS, "newBuilder", new Class<?>[0]);
+        Object paramsBuilder =
+                callStaticMethod(CLASS_QUERY_PRODUCT_DETAILS_PARAMS, "newBuilder", new Class<?>[0]);
         if (paramsBuilder == null) {
             return null;
         }
-        callMethod(paramsBuilder, "setProductList", new Class<?>[]{List.class}, products);
+        callMethod(paramsBuilder, "setProductList", new Class<?>[] {List.class}, products);
         return callMethod(paramsBuilder, "build", new Class<?>[0]);
     }
 
-    private void invokeBillingClientMethod(String methodName, Class<?>[] parameterTypes, Object... args) {
-        callMethod(mBillingClient, methodName, parameterTypes, args);
+    private void invokeBillingClientMethod(
+            String methodName, Class<?>[] parameterTypes, Object... args) {
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!isConsentCurrent()) return;
+
+            callMethod(mBillingClient, methodName, parameterTypes, args);
+        }
     }
 
-    private static Object callStaticMethod(String className, String methodName, Class<?>[] parameterTypes, Object... args) {
+    private static Object callStaticMethod(
+            String className, String methodName, Class<?>[] parameterTypes, Object... args) {
         Method method = TTReflect.getMethod(className, methodName, parameterTypes);
         return TTReflect.callMethod(method, null, args);
     }
 
-    private static Object callMethod(Object receiver, String methodName, Class<?>[] parameterTypes, Object... args) {
+    private static Object callMethod(
+            Object receiver, String methodName, Class<?>[] parameterTypes, Object... args) {
         if (receiver == null) {
             return null;
         }
@@ -652,11 +873,15 @@ class V5_V7BillingProxy implements IBillingProxy {
     }
 
     private static String getSkuType(boolean isInAppPurchase) {
-        return String.valueOf(TTReflect.on(CLASS_SKU_TYPE).findField(isInAppPurchase ? "INAPP" : "SUBS").getValue(null));
+        return String.valueOf(
+                TTReflect.on(CLASS_SKU_TYPE)
+                        .findField(isInAppPurchase ? "INAPP" : "SUBS")
+                        .getValue(null));
     }
 
     private static String getProductType(boolean isSubs) {
-        return String.valueOf(TTReflect.on(CLASS_SKU_TYPE).findField(isSubs ? "SUBS" : "INAPP").getValue(null));
+        return String.valueOf(
+                TTReflect.on(CLASS_SKU_TYPE).findField(isSubs ? "SUBS" : "INAPP").getValue(null));
     }
 
     private static int getBillingResponseCode(Object billingResult) {
@@ -666,7 +891,8 @@ class V5_V7BillingProxy implements IBillingProxy {
 
     private static boolean isOkResponse(Object billingResult) {
         Object okCode = TTReflect.on(CLASS_BILLING_RESPONSE_CODE).findField("OK").getValue(null);
-        return okCode instanceof Integer && getBillingResponseCode(billingResult) == (Integer) okCode;
+        return okCode instanceof Integer
+                && getBillingResponseCode(billingResult) == (Integer) okCode;
     }
 
     private static boolean invokeBooleanMethod(Object receiver, String methodName) {
@@ -722,5 +948,4 @@ class V5_V7BillingProxy implements IBillingProxy {
         Object list = callMethod(result, "getProductDetailsList", new Class<?>[0]);
         return list instanceof List ? (List<?>) list : null;
     }
-
 }

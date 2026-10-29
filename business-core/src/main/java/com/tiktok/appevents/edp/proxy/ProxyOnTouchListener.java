@@ -3,12 +3,16 @@ package com.tiktok.appevents.edp.proxy;
 import android.view.MotionEvent;
 import android.view.View;
 
+import com.tiktok.util.TTTrackingConsent;
+
 public class ProxyOnTouchListener implements View.OnTouchListener {
 
     ITouchListener listener;
     View.OnTouchListener originOnTouchListener;
+    private final long consentGeneration = TTTrackingConsent.capture();
 
-    public ProxyOnTouchListener(ITouchListener listener, View.OnTouchListener originOnTouchListener) {
+    public ProxyOnTouchListener(
+            ITouchListener listener, View.OnTouchListener originOnTouchListener) {
         this.listener = listener;
         this.originOnTouchListener = originOnTouchListener;
     }
@@ -20,11 +24,21 @@ public class ProxyOnTouchListener implements View.OnTouchListener {
             consumed = originOnTouchListener.onTouch(v, event);
         }
         try {
-            if (listener != null) {
-                listener.onTouch(v, event);
-            }
+            TTTrackingConsent.wrap(
+                            consentGeneration,
+                            () -> {
+                                synchronized (TTTrackingConsent.LOCK) {
+                                    if (TTTrackingConsent.isGranted() && listener != null)
+                                        listener.onTouch(v, event);
+                                }
+                            })
+                    .run();
         } catch (Throwable ignore) {
         }
         return consumed;
+    }
+
+    void clear() {
+        listener = null;
     }
 }

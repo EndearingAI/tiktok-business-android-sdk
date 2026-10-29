@@ -21,6 +21,7 @@ import com.tiktok.util.LastSessionUtil;
 import com.tiktok.util.SystemInfoUtil;
 import com.tiktok.util.TTConst;
 import com.tiktok.util.TTLogger;
+import com.tiktok.util.TTTrackingConsent;
 import com.tiktok.util.TTUtil;
 import com.tiktok.util.TimeUtil;
 import com.tiktok.util.UrlConst;
@@ -32,7 +33,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -58,9 +58,10 @@ class TTRequest {
         // these fields wont change, so cache it locally to enhance performance
         headParamMap.put("Content-Type", "application/json");
         headParamMap.put("Connection", "Keep-Alive");
-        String ua = String.format("tiktok-business-android-sdk/%s/%s",
-                BuildConfig.VERSION_NAME,
-                TikTokBusinessSdk.getApiAvailableVersion());
+        String ua =
+                String.format(
+                        "tiktok-business-android-sdk/%s/%s",
+                        BuildConfig.VERSION_NAME, TikTokBusinessSdk.getApiAvailableVersion());
         headParamMap.put("User-Agent", ua);
 
         // no content-type application/json for get requests
@@ -70,7 +71,9 @@ class TTRequest {
     }
 
     public static JSONObject getBusinessSDKConfig() {
-        if (TextUtils.isEmpty(TikTokBusinessSdk.getTTAppId()) || TextUtils.isEmpty(TikTokBusinessSdk.getAppId())) {
+        if (!TTTrackingConsent.isGranted()) return null;
+        if (TextUtils.isEmpty(TikTokBusinessSdk.getTTAppId())
+                || TextUtils.isEmpty(TikTokBusinessSdk.getAppId())) {
             JSONObject result = JSON.build();
             JSON.putBoolean(result, "enable_sdk", false);
             logger.debug("config request return by appid or ttAppId");
@@ -80,24 +83,27 @@ class TTRequest {
         JSONObject paramsJson = buildConfigParams();
         String url = UrlConst.getConfigUrl();
 
-        //handle cache query
+        // handle cache query
         try {
             final String ttAppId = TikTokBusinessSdk.getTTAppId();
-            url = Uri.parse(url).buildUpon()
-                    .appendQueryParameter("tiktok_app_id", ttAppId == null ? "" : ttAppId)
-                    .appendQueryParameter("sdk_version", SystemInfoUtil.getSDKVersion())
-                    .appendQueryParameter("platform", "Android")
-                    .appendQueryParameter("model", Build.MODEL)
-                    .appendQueryParameter("app_version", SystemInfoUtil.getAppVersionName())
-                    .appendQueryParameter("os_version", SystemInfoUtil.getAndroidVersion())
-                    .appendQueryParameter("locale", SystemInfoUtil.getBcp47Language())
-                    .appendQueryParameter("namespace", SystemInfoUtil.getPackageName())
-                    .build()
-                    .toString();
+            url =
+                    Uri.parse(url)
+                            .buildUpon()
+                            .appendQueryParameter("tiktok_app_id", ttAppId == null ? "" : ttAppId)
+                            .appendQueryParameter("sdk_version", SystemInfoUtil.getSDKVersion())
+                            .appendQueryParameter("platform", "Android")
+                            .appendQueryParameter("model", Build.MODEL)
+                            .appendQueryParameter("app_version", SystemInfoUtil.getAppVersionName())
+                            .appendQueryParameter("os_version", SystemInfoUtil.getAndroidVersion())
+                            .appendQueryParameter("locale", SystemInfoUtil.getBcp47Language())
+                            .appendQueryParameter("namespace", SystemInfoUtil.getPackageName())
+                            .build()
+                            .toString();
         } catch (Throwable ignore) {
         }
 
-        HttpRequestUtil.HttpResponse result = HttpRequestUtil.doPost(url, getHeadParamMap, paramsJson.toString(), false);
+        HttpRequestUtil.HttpResponse result =
+                HttpRequestUtil.doPost(url, getHeadParamMap, paramsJson.toString(), false);
         if (result != null) {
             logger.debug(result.url);
             logger.debug("code=" + String.valueOf(result.code));
@@ -112,10 +118,12 @@ class TTRequest {
     }
 
     public static JSONObject getDebugModeConfig() {
+        if (!TTTrackingConsent.isGranted()) return null;
         try {
             JSONObject paramsJson = buildConfigParams();
             String url = UrlConst.getDebugModeUrl();
-            HttpRequestUtil.HttpResponse response = HttpRequestUtil.doPost(url, getHeadParamMap, paramsJson.toString(), false);
+            HttpRequestUtil.HttpResponse response =
+                    HttpRequestUtil.doPost(url, getHeadParamMap, paramsJson.toString(), false);
             if (response != null && response.isOK()) {
                 return JSON.getJsonObject(response.body, "data");
             }
@@ -125,6 +133,7 @@ class TTRequest {
     }
 
     public static JSONObject buildConfigParams() {
+        if (!TTTrackingConsent.isGranted()) return JSON.build();
         JSONObject jsonObject = JSON.build();
         try {
             JSONObject app = getAppInfo();
@@ -135,7 +144,9 @@ class TTRequest {
             JSON.putObject(device, "version", SystemInfoUtil.getAndroidVersion());
             if (TikTokBusinessSdk.isGaidCollectionEnabled()) {
                 try {
-                    TTIdentifierFactory.AdIdInfo adIdInfo = TTIdentifierFactory.getGoogleAdIdInfo(TikTokBusinessSdk.getApplicationContext());
+                    TTIdentifierFactory.AdIdInfo adIdInfo =
+                            TTIdentifierFactory.getGoogleAdIdInfo(
+                                    TikTokBusinessSdk.getApplicationContext());
                     JSON.putObject(device, "gaid", adIdInfo.getAdId());
                 } catch (Throwable ignore) {
                 }
@@ -165,16 +176,17 @@ class TTRequest {
     }
 
     /**
-     * Try to send events to api with MTU set to 1000 app events,
-     * If there are more than 1000 events, they will be split into several chunks and
-     * then be sent separately,
-     * Any failed events will be accumulated and finally returned.
+     * Try to send events to api with MTU set to 1000 app events, If there are more than 1000
+     * events, they will be split into several chunks and then be sent separately, Any failed events
+     * will be accumulated and finally returned.
      *
      * @param appEventList event list
      * @return the accumulation of all failed events
      */
-    public static synchronized List<TTAppEvent> reportAppEvent(JSONObject basePayload, List<TTAppEvent> appEventList, boolean isEdp) {
+    public static synchronized List<TTAppEvent> reportAppEvent(
+            JSONObject basePayload, List<TTAppEvent> appEventList, boolean isEdp) {
         TTUtil.checkThread(TAG);
+        if (!TTTrackingConsent.isGranted()) return new ArrayList<>();
         if (appEventList == null || appEventList.isEmpty()) {
             return new ArrayList<>();
         }
@@ -195,6 +207,7 @@ class TTRequest {
         List<List<TTAppEvent>> chunks = averageAssign(appEventList, MAX_EVENT_SIZE);
 
         for (List<TTAppEvent> currentBatch : chunks) {
+            if (!TTTrackingConsent.isGranted()) return new ArrayList<>();
             JSONArray batch = JSON.buildArr();
             for (TTAppEvent event : currentBatch) {
                 JSONObject propertiesJson = transferJson(event);
@@ -208,7 +221,7 @@ class TTRequest {
                 continue;
             }
 
-            //remove
+            // remove
             JSON.putObject(basePayload, "batch", null);
 
             try {
@@ -220,11 +233,12 @@ class TTRequest {
                 TTCrashHandler.handleCrash(TAG, e, TTSDK_EXCEPTION_SDK_CATCH);
                 continue;
             }
-            HttpRequestUtil.HttpResponse result = HttpRequestUtil.doPost(url, headParamMap, basePayload.toString());
+            HttpRequestUtil.HttpResponse result =
+                    HttpRequestUtil.doPost(url, headParamMap, basePayload.toString());
+            if (!TTTrackingConsent.isGranted()) return new ArrayList<>();
             if (isEdp) {
                 return null;
             }
-
 
             if (result == null || !result.isOK()) {
                 failedEventsToBeSaved.addAll(currentBatch);
@@ -235,7 +249,9 @@ class TTRequest {
                     logger.debug("rsp=" + String.valueOf(result.body));
 
                     int code = result.code;
-                    if (TikTokBusinessSdk.isInSdkDebugMode() || code == TTConst.ApiErrorCodes.API_ERROR.code || code == TTConst.ApiErrorCodes.PARTIAL_SUCCESS.code) {
+                    if (TikTokBusinessSdk.isInSdkDebugMode()
+                            || code == TTConst.ApiErrorCodes.API_ERROR.code
+                            || code == TTConst.ApiErrorCodes.PARTIAL_SUCCESS.code) {
                         failedEventsToBeDiscardedSize += currentBatch.size();
                         failedRequests += currentBatch.size();
                     } else if (code != 0) {
@@ -243,7 +259,8 @@ class TTRequest {
                         failedRequests += currentBatch.size();
                     } else {
                         successfulRequests += currentBatch.size();
-                        successfullySentRequests.addAll(currentBatch);
+                        TTTrackingConsent.runIfGranted(
+                                () -> successfullySentRequests.addAll(currentBatch));
                     }
                 } catch (Throwable e) {
                     failedRequests += currentBatch.size();
@@ -279,9 +296,14 @@ class TTRequest {
     }
 
     private static void notifyChange() {
+        if (!TTTrackingConsent.isGranted()) return;
         if (TikTokBusinessSdk.networkListener != null) {
-            TikTokBusinessSdk.networkListener.onNetworkChange(toBeSentRequests, successfulRequests,
-                    failedRequests, allRequestIds.size() + TTAppEventsQueue.size(), successfullySentRequests.size());
+            TikTokBusinessSdk.networkListener.onNetworkChange(
+                    toBeSentRequests,
+                    successfulRequests,
+                    failedRequests,
+                    allRequestIds.size() + TTAppEventsQueue.size(),
+                    successfullySentRequests.size());
         }
     }
 
@@ -292,13 +314,19 @@ class TTRequest {
         try {
             JSONObject propertiesJson = JSON.build();
 
-            JSON.putObject(propertiesJson, "event_id", UUID.randomUUID());
-            JSON.putObject(propertiesJson, "tt_event_id", TextUtils.isEmpty(event.getEventId()) ? "" : event.getEventId());
+            JSON.putObject(propertiesJson, "event_id", event.getTransportEventId());
+            JSON.putObject(
+                    propertiesJson,
+                    "tt_event_id",
+                    TextUtils.isEmpty(event.getEventId()) ? "" : event.getEventId());
             JSON.putObject(propertiesJson, "type", event.getType());
             if (event.getEventName() != null) {
                 JSON.putObject(propertiesJson, "event", event.getEventName());
             }
-            JSON.putObject(propertiesJson, "timestamp", TimeUtil.getISO8601Timestamp(event.getTimeStamp()));
+            JSON.putObject(
+                    propertiesJson,
+                    "timestamp",
+                    TimeUtil.getISO8601Timestamp(event.getTimeStamp()));
             if (TikTokBusinessSdk.isInSdkLDUMode()) {
                 JSON.putBoolean(propertiesJson, "limited_data_use", true);
             }
@@ -312,7 +340,8 @@ class TTRequest {
 
             final ReferrerInfo refer = SystemInfoUtil.getInstallReferrer();
             if (refer != null) {
-                JSON.putLong(propertiesJson, "gp_referrer_install_ts", refer.getGpReferrerInstallTs());
+                JSON.putLong(
+                        propertiesJson, "gp_referrer_install_ts", refer.getGpReferrerInstallTs());
                 JSON.putLong(propertiesJson, "gp_referrer_click_ts", refer.getGpReferrerClickTs());
             }
 
@@ -328,9 +357,7 @@ class TTRequest {
         }
     }
 
-    /**
-     * split event list
-     */
+    /** split event list */
     public static <T> List<List<T>> averageAssign(List<T> sourceList, int splitNum) {
         List<List<T>> result = new ArrayList<>();
         if (sourceList == null || sourceList.isEmpty()) {
@@ -369,7 +396,16 @@ class TTRequest {
         return HttpRequestUtil.doPost(url, headParamMap, stat.toString(), false);
     }
 
+    static void clearTrackingData() {
+        successfullySentRequests.clear();
+        allRequestIds.clear();
+        headParamMap.remove("X-TT-Signature");
+        getHeadParamMap.remove("X-TT-Signature");
+        toBeSentRequests = failedRequests = successfulRequests = 0;
+    }
+
     public static JSONObject getAppInfo() {
+        if (!TTTrackingConsent.isGranted()) return JSON.build();
         JSONObject app = JSON.build();
         try {
             if (TikTokBusinessSdk.bothIdsProvided()) {
@@ -387,5 +423,4 @@ class TTRequest {
         }
         return app;
     }
-
 }

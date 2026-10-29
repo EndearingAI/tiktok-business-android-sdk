@@ -8,6 +8,9 @@ include ':business-core'
 
 //include ':samples:iabtest'
 //include ':samples:internalmonitor'
-include ':samples:TestApp'
+// Samples use their upstream build setup; publishing only needs the library.
+if (hasProperty('includeSamples')) {
+    include ':samples:TestApp'
+}
 
 rootProject.name = "Tiktok Business SDK"

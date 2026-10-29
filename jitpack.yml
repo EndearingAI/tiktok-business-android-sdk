@@ -1,0 +1,4 @@
+jdk:
+  - openjdk17
+install:
+  - ./gradlew :business-core:publishReleasePublicationToMavenLocal -PforkPublicationGroup=com.github.EndearingAI -PforkPublicationVersion=$VERSION

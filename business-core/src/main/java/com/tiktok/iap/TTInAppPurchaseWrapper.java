@@ -8,10 +8,12 @@ package com.tiktok.iap;
 
 import android.app.Activity;
 
+import com.tiktok.TikTokBusinessSdk;
 import com.tiktok.iap.billing.client.IBillingProxy;
 import com.tiktok.iap.billing.client.TTBillingFactory;
 import com.tiktok.util.JSON;
 import com.tiktok.util.TTSafeRunnable;
+import com.tiktok.util.TTTrackingConsent;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -24,7 +26,7 @@ import java.util.concurrent.Executors;
 public class TTInAppPurchaseWrapper {
     public static final ExecutorService sExecutor = Executors.newSingleThreadExecutor();
 
-    public static volatile int devAutoTrack = 0;//default0、1open、2close
+    public static volatile int devAutoTrack = 0; // default0、1open、2close
 
     public static volatile boolean hasReportedHistoryInLife = false;
     public static volatile boolean autoTrackPaymentEnable = true;
@@ -40,93 +42,139 @@ public class TTInAppPurchaseWrapper {
     private static volatile String sPreviousActivity;
 
     static {
-        autoTrackPaymentTypes.add(1); //INAPP
-        autoTrackPaymentTypes.add(2); //SUBS
+        autoTrackPaymentTypes.add(1); // INAPP
+        autoTrackPaymentTypes.add(2); // SUBS
+    }
+
+    public static void clearTrackingData(android.content.Context context) {
+        if (sBillingProxy != null) sBillingProxy.close();
+        sBillingProxy = null;
+        sPreviousActivity = null;
+        hasReportedHistoryInLife = false;
+        if (context != null
+                && !context.getSharedPreferences(
+                                "com.tiktok.sdk.pay", android.content.Context.MODE_PRIVATE)
+                        .edit()
+                        .clear()
+                        .commit()) {
+            throw new IllegalStateException("Unable to erase TikTok purchase tracking preferences");
+        }
     }
 
     public static void registerIapTrack() {
-        try {
-            if (autoTrackPaymentEnable) {
-                sExecutor.submit(new TTSafeRunnable() {
-                    @Override
-                    public void doSafeRun() {
-                        final IBillingProxy proxy = getBillingProxy();
-                        if (proxy != null) {
-                            proxy.init();
-                        }
-                    }
-                });
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isGranted()) return;
+
+            if (!TTTrackingConsent.isGranted() || !TikTokBusinessSdk.enableAutoIapTrack()) return;
+            try {
+                if (autoTrackPaymentEnable) {
+                    sExecutor.submit(
+                            TTTrackingConsent.wrap(
+                                    new TTSafeRunnable() {
+                                        @Override
+                                        public void doSafeRun() {
+                                            final IBillingProxy proxy = getBillingProxy();
+                                            if (proxy != null) {
+                                                proxy.init();
+                                            }
+                                        }
+                                    }));
+                }
+            } catch (Throwable ignored) {
             }
-        } catch (Throwable ignored) {
         }
     }
 
     public static void tryReportIapEvent(Activity activity) {
-        try {
-            if (activity == null) {
-                return;
-            }
-            if (autoTrackPaymentEnable && autoTrackPaymentHistory) {
-                final String actName = activity.getClass().getSimpleName();
-                final boolean actIsBill = sPreviousActivity != null && sPreviousActivity.contains(ACT_BILLING)
-                        && !actName.contains(ACT_BILLING);
-                if (!hasReportedHistoryInLife || actIsBill) {
-                    sExecutor.submit(new TTSafeRunnable() {
-                        @Override
-                        public void doSafeRun() {
-                            final IBillingProxy proxy = getBillingProxy();
-                            if (proxy != null) {
-                                proxy.queryPurchaseHistory();
-                            }
-                        }
-                    });
-                }
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isGranted()) return;
 
-                sPreviousActivity = actName;
+            if (!TTTrackingConsent.isGranted() || !TikTokBusinessSdk.enableAutoIapTrack()) return;
+            try {
+                if (activity == null) {
+                    return;
+                }
+                if (autoTrackPaymentEnable && autoTrackPaymentHistory) {
+                    final String actName = activity.getClass().getSimpleName();
+                    final boolean actIsBill =
+                            sPreviousActivity != null
+                                    && sPreviousActivity.contains(ACT_BILLING)
+                                    && !actName.contains(ACT_BILLING);
+                    if (!hasReportedHistoryInLife || actIsBill) {
+                        sExecutor.submit(
+                                TTTrackingConsent.wrap(
+                                        new TTSafeRunnable() {
+                                            @Override
+                                            public void doSafeRun() {
+                                                final IBillingProxy proxy = getBillingProxy();
+                                                if (proxy != null) {
+                                                    proxy.queryPurchaseHistory();
+                                                }
+                                            }
+                                        }));
+                    }
+
+                    sPreviousActivity = actName;
+                }
+            } catch (Throwable ignored) {
             }
-        } catch (Throwable ignored) {
         }
     }
 
     public static void updateConfig(JSONObject config) {
-        try {
-            if (config == null) {
-                return;
-            }
+        synchronized (TTTrackingConsent.LOCK) {
+            if (!TTTrackingConsent.isGranted()) return;
+            try {
+                if (config == null) {
+                    return;
+                }
 
-            autoTrackPaymentEnable = JSON.getBoolean(config, "auto_track_Payment_enable", true);
-            autoTrackPaymentJson = autoTrackPaymentEnable && JSON.getInt(config, "auto_track_Payment_json", 1) == 1;
-            autoTrackPaymentHistory = autoTrackPaymentEnable && JSON.getInt(config, "auto_track_Payment_history_enable", 1) == 1;
-            autoTrackPaymentHistoryINAPP = JSON.getInt(config, "auto_track_Payment_history_inapp_size", 200);
-            autoTrackPaymentHistorySUBS = JSON.getInt(config, "auto_track_Payment_history_subs_size", 20);
+                autoTrackPaymentEnable = JSON.getBoolean(config, "auto_track_Payment_enable", true);
+                autoTrackPaymentJson =
+                        autoTrackPaymentEnable
+                                && JSON.getInt(config, "auto_track_Payment_json", 1) == 1;
+                autoTrackPaymentHistory =
+                        autoTrackPaymentEnable
+                                && JSON.getInt(config, "auto_track_Payment_history_enable", 1) == 1;
+                autoTrackPaymentHistoryINAPP =
+                        JSON.getInt(config, "auto_track_Payment_history_inapp_size", 200);
+                autoTrackPaymentHistorySUBS =
+                        JSON.getInt(config, "auto_track_Payment_history_subs_size", 20);
 
-            JSONArray types = JSON.getJsonArray(config, "auto_track_Payment_types");
-            if (types != null) {
-                autoTrackPaymentTypes.clear();
-                int count = types.length();
-                for (int i = 0; i < count; i++) {
-                    try {
-                        int type = types.optInt(i, -2);
-                        if (type > 0) {
-                            autoTrackPaymentTypes.add(type);
+                JSONArray types = JSON.getJsonArray(config, "auto_track_Payment_types");
+                if (types != null) {
+                    autoTrackPaymentTypes.clear();
+                    int count = types.length();
+                    for (int i = 0; i < count; i++) {
+                        try {
+                            int type = types.optInt(i, -2);
+                            if (type > 0) {
+                                autoTrackPaymentTypes.add(type);
+                            }
+                        } catch (Throwable ignore) {
                         }
-                    } catch (Throwable ignore) {
                     }
                 }
+            } catch (Throwable ignore) {
             }
-        } catch (Throwable ignore) {
-        }
 
-        //register iap track
-        registerIapTrack();
+            // register iap track
+            registerIapTrack();
+        }
     }
 
     public static boolean canTrackINAPP() {
-        return autoTrackPaymentEnable && autoTrackPaymentTypes.contains(1);
+        return TTTrackingConsent.isGranted()
+                && TikTokBusinessSdk.enableAutoIapTrack()
+                && autoTrackPaymentEnable
+                && autoTrackPaymentTypes.contains(1);
     }
 
     public static boolean canTrackSUBS() {
-        return autoTrackPaymentEnable && autoTrackPaymentTypes.contains(2);
+        return TTTrackingConsent.isGranted()
+                && TikTokBusinessSdk.enableAutoIapTrack()
+                && autoTrackPaymentEnable
+                && autoTrackPaymentTypes.contains(2);
     }
 
     private static IBillingProxy getBillingProxy() {
@@ -139,5 +187,4 @@ public class TTInAppPurchaseWrapper {
         }
         return sBillingProxy;
     }
-
 }

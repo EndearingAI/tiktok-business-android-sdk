@@ -30,10 +30,14 @@ requirement that must complete before later initialization can collect data.
 `startTrack()` now delegates to an explicit consent grant. `disableAutoStart()`
 does not grant consent or provide an alternate privacy mechanism.
 
-Initializing while denied saves only the supplied configuration/callback and
-purges SDK tracking data. It creates no logger, identity, lifecycle observer,
-timer, or request. Repeated initialization completes its callback when the
-existing initialization is ready, including explicit initialization after regrant.
+Initializing while denied retains only the supplied configuration, purges SDK
+tracking data, and immediately fails each callback once with code `-3` and a
+consent-required message. It creates no logger, identity, lifecycle observer,
+timer, or request. Withdrawal fails every pending initialization callback once
+with a consent-withdrawn message. Initialization attempts own their callbacks by
+consent generation, so a late completion cannot settle a later attempt's callbacks.
+Repeated initialization completes its callback when the existing initialization
+is ready, including explicit initialization after regrant.
 
 `getAnonymousID()` returns null while denied or before initialization. Withdrawal
 clears anonymous, advertising, external-user and session IDs; referrer and cached

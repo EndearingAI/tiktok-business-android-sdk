@@ -576,6 +576,95 @@ public class TrackingConsentTest {
         assertEquals(1, completed.get());
     }
 
+    @Test
+    public void withdrawalSettlesEveryPendingInitializationBeforeRegrant() throws Exception {
+        CountDownLatch blocked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        Future<?> barrier =
+                TTAppEventLogger.eventLoop.submit(
+                        () -> {
+                            blocked.countDown();
+                            try {
+                                assertTrue(release.await(10, TimeUnit.SECONDS));
+                            } catch (InterruptedException error) {
+                                Thread.currentThread().interrupt();
+                                throw new AssertionError(error);
+                            }
+                        });
+        assertTrue(blocked.await(5, TimeUnit.SECONDS));
+        java.util.concurrent.atomic.AtomicInteger cancelled =
+                new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger succeeded =
+                new java.util.concurrent.atomic.AtomicInteger();
+        TikTokBusinessSdk.TTInitCallback callback =
+                new TikTokBusinessSdk.TTInitCallback() {
+                    @Override
+                    public void success() {
+                        succeeded.incrementAndGet();
+                    }
+
+                    @Override
+                    public void fail(int code, String message) {
+                        assertTrue(message.toLowerCase().contains("consent"));
+                        cancelled.incrementAndGet();
+                    }
+                };
+        try {
+            TikTokBusinessSdk.setTrackingEnabled(true);
+            TikTokBusinessSdk.initializeSdk(config(), callback);
+            TikTokBusinessSdk.initializeSdk(config(), callback);
+            TikTokBusinessSdk.setTrackingEnabled(false);
+            assertEquals(
+                    "Both bridge initialization promises must settle on withdrawal",
+                    2,
+                    cancelled.get());
+            assertEquals(0, succeeded.get());
+        } finally {
+            release.countDown();
+            barrier.get(10, TimeUnit.SECONDS);
+        }
+        drain();
+        assertEquals(2, cancelled.get());
+        TikTokBusinessSdk.setTrackingEnabled(true);
+        TikTokBusinessSdk.initializeSdk(config(), callback);
+        drain();
+        assertEquals(1, succeeded.get());
+        assertEquals(2, cancelled.get());
+    }
+
+    @Test
+    public void deniedInitializationSettlesEachCallbackWithoutWaitingForOrReplayingOnGrant()
+            throws Exception {
+        java.util.concurrent.atomic.AtomicInteger cancelled =
+                new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger succeeded =
+                new java.util.concurrent.atomic.AtomicInteger();
+        TikTokBusinessSdk.TTInitCallback callback =
+                new TikTokBusinessSdk.TTInitCallback() {
+                    @Override
+                    public void success() {
+                        succeeded.incrementAndGet();
+                    }
+
+                    @Override
+                    public void fail(int code, String message) {
+                        assertTrue(message.toLowerCase().contains("consent"));
+                        cancelled.incrementAndGet();
+                    }
+                };
+        TikTokBusinessSdk.initializeSdk(config(), callback);
+        TikTokBusinessSdk.initializeSdk(config(), callback);
+        assertEquals(2, cancelled.get());
+        assertEquals(0, succeeded.get());
+        assertEquals(0, server.getRequestCount());
+        TikTokBusinessSdk.setTrackingEnabled(false);
+        TikTokBusinessSdk.setTrackingEnabled(true);
+        drain();
+        assertEquals(2, cancelled.get());
+        assertEquals(0, succeeded.get());
+        assertTrue(TikTokBusinessSdk.isInitialized());
+    }
+
     private JSONObject findEvent(String requests, String name) throws Exception {
         for (String request : requests.split("\\n")) {
             if (request.isEmpty()) continue;

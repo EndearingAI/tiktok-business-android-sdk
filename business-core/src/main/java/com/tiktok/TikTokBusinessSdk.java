@@ -101,8 +101,7 @@ public class TikTokBusinessSdk {
     /** unique session ID, not persisted */
     private static String sessionID;
 
-    private static TTInitCallback pendingInitCallback;
-    private static final List<TTInitCallback> initializationCallbacks = new ArrayList<>();
+    private static InitializationCallbacks initializationCallbacks;
     private static Thread.UncaughtExceptionHandler crashHandler;
     private static Thread.UncaughtExceptionHandler previousCrashHandler;
 
@@ -183,10 +182,13 @@ public class TikTokBusinessSdk {
             consentApplication = ttConfig.application;
             if (!TTTrackingConsent.isGranted()) {
                 config = ttConfig;
-                pendingInitCallback = callback;
                 trackingDataNeedsClearing = true;
-                TTAppEventLogger.clearTrackingData(ttConfig.application);
-                trackingDataNeedsClearing = false;
+                try {
+                    TTAppEventLogger.clearTrackingData(ttConfig.application);
+                    trackingDataNeedsClearing = false;
+                } finally {
+                    InitializationCallbacks.rejectWithoutConsent(callback);
+                }
                 return;
             }
             initializeWithConsent(ttConfig, callback);
@@ -222,6 +224,8 @@ public class TikTokBusinessSdk {
 
         long initTimeMS = System.currentTimeMillis();
         final long initializationGeneration = TTTrackingConsent.capture();
+        initializationCallbacks = new InitializationCallbacks(initializationGeneration);
+        initializationCallbacks.add(callback);
         try {
             previousCrashHandler = Thread.getDefaultUncaughtExceptionHandler();
             final Thread.UncaughtExceptionHandler existingExHandler = previousCrashHandler;
@@ -257,21 +261,7 @@ public class TikTokBusinessSdk {
                         ttConfig.disabledEvents,
                         ttConfig.flushTime,
                         ttConfig.disableMetrics);
-        if (callback != null) initializationCallbacks.add(callback);
-        appEventLogger.initConfig(
-                initTimeMS,
-                new TTInitCallback() {
-                    @Override
-                    public void success() {
-                        completeInitializationCallbacks(0, null);
-                    }
-
-                    @Override
-                    public void fail(int code, String message) {
-                        completeInitializationCallbacks(code, message);
-                    }
-                },
-                sdkInitialized);
+        appEventLogger.initConfig(initTimeMS, initializationCallbacks, sdkInitialized);
 
         try {
             long endTimeMS = System.currentTimeMillis();
@@ -279,18 +269,6 @@ public class TikTokBusinessSdk {
             JSON.putLong(meta, "latency", endTimeMS - initTimeMS);
             appEventLogger.monitorMetric("init_end", meta, null);
         } catch (Throwable ignored) {
-        }
-    }
-
-    private static void completeInitializationCallbacks(int code, @Nullable String message) {
-        synchronized (TTTrackingConsent.LOCK) {
-            List<TTInitCallback> callbacks = new ArrayList<>(initializationCallbacks);
-            initializationCallbacks.clear();
-            for (TTInitCallback callback : callbacks) {
-                if (!TTTrackingConsent.isGranted()) return;
-                if (message == null) callback.success();
-                else callback.fail(code, message);
-            }
         }
     }
 
@@ -323,43 +301,46 @@ public class TikTokBusinessSdk {
             TTTrackingConsent.setEnabled(enabled);
             networkSwitch.set(enabled);
             if (!enabled) {
-                trackingDataNeedsClearing = true;
-                RuntimeException cleanupFailure = null;
-                if (appEventLogger != null) appEventLogger.destroy();
-                Application application = getApplicationContext();
-                if (application != null) {
-                    if (ttActivityLifecycleCallbacks != null) {
-                        application.unregisterActivityLifecycleCallbacks(
-                                ttActivityLifecycleCallbacks);
-                        ttActivityLifecycleCallbacks = null;
+                InitializationCallbacks cancelled = initializationCallbacks;
+                initializationCallbacks = null;
+                try {
+                    trackingDataNeedsClearing = true;
+                    RuntimeException cleanupFailure = null;
+                    if (appEventLogger != null) appEventLogger.destroy();
+                    Application application = getApplicationContext();
+                    if (application != null) {
+                        if (ttActivityLifecycleCallbacks != null) {
+                            application.unregisterActivityLifecycleCallbacks(
+                                    ttActivityLifecycleCallbacks);
+                            ttActivityLifecycleCallbacks = null;
+                        }
+                        try {
+                            TTAppEventLogger.clearTrackingData(application);
+                            trackingDataNeedsClearing = false;
+                        } catch (RuntimeException error) {
+                            cleanupFailure = error;
+                        }
+                    } else {
+                        TTAppEventLogger.clearTrackingData(null);
                     }
-                    try {
-                        TTAppEventLogger.clearTrackingData(application);
-                        trackingDataNeedsClearing = false;
-                    } catch (RuntimeException error) {
-                        cleanupFailure = error;
+                    if (crashHandler != null
+                            && Thread.getDefaultUncaughtExceptionHandler() == crashHandler) {
+                        Thread.setDefaultUncaughtExceptionHandler(previousCrashHandler);
                     }
-                } else {
-                    TTAppEventLogger.clearTrackingData(null);
+                    crashHandler = null;
+                    previousCrashHandler = null;
+                    appEventLogger = null;
+                    ttSdk = null;
+                    sessionID = null;
+                    globalConfigFetched.set(false);
+                    sdkInitialized.set(false);
+                    isActivatedLogicRun = false;
+                    if (cleanupFailure != null) throw cleanupFailure;
+                } finally {
+                    if (cancelled != null) cancelled.cancelForConsent();
                 }
-                if (crashHandler != null
-                        && Thread.getDefaultUncaughtExceptionHandler() == crashHandler) {
-                    Thread.setDefaultUncaughtExceptionHandler(previousCrashHandler);
-                }
-                crashHandler = null;
-                previousCrashHandler = null;
-                appEventLogger = null;
-                ttSdk = null;
-                sessionID = null;
-                globalConfigFetched.set(false);
-                sdkInitialized.set(false);
-                isActivatedLogicRun = false;
-                initializationCallbacks.clear();
-                if (cleanupFailure != null) throw cleanupFailure;
             } else if (!wasEnabled && config != null) {
-                TTInitCallback callback = pendingInitCallback;
-                pendingInitCallback = null;
-                initializeWithConsent(config, callback);
+                initializeWithConsent(config, null);
             }
         }
     }
@@ -405,7 +386,6 @@ public class TikTokBusinessSdk {
         synchronized (TTTrackingConsent.LOCK) {
             setTrackingEnabled(false);
             config = null;
-            pendingInitCallback = null;
             ttSdk = null;
             memoryListener = null;
             diskListener = null;
